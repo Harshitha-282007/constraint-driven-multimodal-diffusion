@@ -1,0 +1,12 @@
+# Installed in the Colab run: diffusers transformers accelerate safetensors gradio psutil
+diffusers
+transformers
+accelerate
+safetensors
+gradio
+psutil
+
+# Preinstalled on Colab, but needed for a local install
+torch
+numpy
+pillow
