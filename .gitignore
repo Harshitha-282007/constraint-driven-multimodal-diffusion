@@ -1,0 +1,5 @@
+*.zip
+data/pilot_v1/
+data/reference_images/
+__pycache__/
+.ipynb_checkpoints/
