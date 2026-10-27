@@ -55,6 +55,17 @@ Sketchy database
     └── unicombine_flux_attempt/       # abandoned FLUX route
 ```
 
+## Interface
+
+`app/app.py` is a Gradio app. Upload a sketch and a reference image, write a caption, and it shows the outputs
+of the four arms (fixed / scheduled / router / router_guided) with the router's chosen weights and the metrics.
+
+    pip install -r app/requirements.txt
+    python app/app.py
+
+Needs a GPU (SDXL + ControlNet + IP-Adapter use roughly 10 GB). On Colab, run it in a T4 notebook and use
+`share=True` to get a public link.
+
 ## Dataset generation
 
 Source data is the [Sketchy database](https://sketchy.eye.gatech.edu/) (human-drawn sketches paired with photos): 125 categories × 100 photos = 12,500 photos, 75,481 sketch-photo pairs.
