@@ -74,11 +74,15 @@ Sketchy database
 
 ## Interface
 
-`app/app.py` is a Gradio app. Upload a sketch and a reference image, write a caption, and it shows the outputs
-of the four arms (fixed / scheduled / router / router_guided) with the router's chosen weights and the metrics.
+`app/app.py` is a Gradio app. Upload a sketch and a reference image, write a caption, and it shows the governed
+output together with the gates the governance network predicted and which modality governed each property.
+The old arms (fixed / scheduled / router / router_guided) remain selectable for comparison.
 
     pip install -r app/requirements.txt
-    python app/app.py
+    cd app && python app.py
+
+It needs `models/governance.pt` (from notebook 05). `models/fusion_lora.safetensors` (from notebook 06) is optional
+and adds a "Governed + fusion LoRA" method when present.
 
 Needs a GPU (SDXL + ControlNet + IP-Adapter use roughly 10 GB). On Colab, run it in a T4 notebook and use
 `share=True` to get a public link.
