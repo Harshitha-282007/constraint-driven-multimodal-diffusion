@@ -29,6 +29,8 @@ class GovernanceNet(nn.Module):
                                  nn.Linear(256, 64), nn.ReLU(), nn.Linear(64, len(GATES)))
         iu = torch.triu_indices(N_SLOTS, N_SLOTS, offset=1)
         self.register_buffer("iu0", iu[0]); self.register_buffer("iu1", iu[1])
+        # per-gate Platt scaling, fitted on the validation photos by calibrate(); identity until then
+        self.register_buffer("cal_a", torch.ones(len(GATES))); self.register_buffer("cal_b", torch.zeros(len(GATES)))
 
     def forward(self, x):
         """x: (B, 6, d). Returns logits (B, 3)."""
@@ -64,11 +66,34 @@ def fit(X, Y, epochs=60, lr=1e-3, wd=1e-2, bs=64, seed=0, device="cpu", Xv=None,
 
 
 @torch.no_grad()
-def predict(m, X, device=None):
-    """Gate probabilities (N, 3) on CPU."""
+def logits(m, X, device=None):
     device = device or next(m.parameters()).device
     m.eval()
-    return torch.cat([torch.sigmoid(m(X[i:i + 256].to(device))).cpu() for i in range(0, len(X), 256)])
+    return torch.cat([m(X[i:i + 256].to(device)).cpu() for i in range(0, len(X), 256)])
+
+
+@torch.no_grad()
+def predict(m, X, device=None):
+    """Calibrated gate probabilities (N, 3) on CPU."""
+    return torch.sigmoid(logits(m, X, device) * m.cal_a.cpu() + m.cal_b.cpu())
+
+
+@torch.no_grad()
+def calibrate(m, Xv, Yv, device=None):
+    """Fit per-gate Platt scaling on held-out rows.
+
+    Training uses a positive-class weight to cope with rare gates, which pushes probabilities up; the gates are
+    used as continuous strengths in the pipeline, so they must be calibrated. Returns {gate: (a, b)}.
+    """
+    from sklearn.linear_model import LogisticRegression
+    L, Yv = logits(m, Xv, device).numpy(), np.asarray(Yv)
+    out = {}
+    for j, g in enumerate(GATES):
+        if 0 < Yv[:, j].mean() < 1:
+            lr = LogisticRegression(C=1e4, max_iter=1000).fit(L[:, j:j + 1], Yv[:, j])
+            m.cal_a[j], m.cal_b[j] = float(lr.coef_[0, 0]), float(lr.intercept_[0])
+        out[g] = (float(m.cal_a[j]), float(m.cal_b[j]))
+    return out
 
 
 def predict_gates(m, x):
@@ -122,5 +147,5 @@ def save(m, path, extra=None):
 def load(path, device="cpu"):
     ck = torch.load(path, map_location="cpu", weights_only=False)
     m = GovernanceNet(**ck["cfg"])
-    m.load_state_dict(ck["state"])
+    m.load_state_dict(ck["state"], strict=False)      # checkpoints saved before calibration lack cal_a / cal_b
     return m.to(device).eval()
