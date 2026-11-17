@@ -1,8 +1,9 @@
-# Installed in the Colab run: diffusers transformers accelerate safetensors gradio psutil
+# Installed in the Colab run: diffusers transformers accelerate safetensors peft gradio psutil
 diffusers
 transformers
 accelerate
 safetensors
+peft          # loads the fusion LoRA (models/fusion_lora.safetensors)
 gradio
 psutil
 
@@ -10,3 +11,6 @@ psutil
 torch
 numpy
 pillow
+
+# Only for training and evaluation (notebooks 05-07), not for the interface
+# scikit-learn scipy opencv-python-headless lpips bitsandbytes
