@@ -13,7 +13,7 @@ Training losses for the role gates. Everything here is differentiable torch (ima
 import torch
 import torch.nn.functional as F
 
-from .gates import CROSS_GATES, REF_OFF_INIT, STYLE_PREFIX
+from .gates import CROSS_GATES, ref_init
 
 _M = torch.tensor([[0.4124564, 0.3575761, 0.1804375], [0.2126729, 0.7151522, 0.0721750], [0.0193339, 0.1191920, 0.9503041]])
 _WHITE = torch.tensor([0.95047, 1.0, 1.08883])
@@ -86,8 +86,8 @@ def prior_loss(collected, obj_mask, flags):
     collected: [(name, gates)] from GateContext.collect (cross-attention (B,N,6), pooled (B,), ControlNet ignored);
     obj_mask (B,1,H,W) in {0,1}; flags (B,3) rule labels (object, colour, material). Targets: text colour / material
     gates 0 when that attribute is in conflict (else 1); text identity and other 1; reference gates at their layer's
-    initial level on the object (1 in the style block, REF_OFF_INIT elsewhere: full IP-Adapter strength in every
-    layer leaks the reference's layout and identity) and 0 off it.
+    initial level on the object (gates.ref_init: full IP-Adapter strength in every layer leaks the reference's layout
+    and identity) and 0 off it.
     """
     total, n = 0.0, 0
     for name, g in collected:
@@ -103,10 +103,10 @@ def prior_loss(collected, obj_mask, flags):
         if s * s != nq:
             continue
         m = F.interpolate(obj_mask.float(), size=(s, s), mode="area").view(b, nq, 1).to(g.device)
-        lvl = 1.0 if name.startswith(STYLE_PREFIX) else REF_OFF_INIT
+        lc, lt = ref_init(name)
         tgt = torch.ones_like(g)
-        tgt[..., CROSS_GATES.index("ref_colour")] = lvl * m[..., 0]
-        tgt[..., CROSS_GATES.index("ref_texture")] = lvl * m[..., 0]
+        tgt[..., CROSS_GATES.index("ref_colour")] = lc * m[..., 0]
+        tgt[..., CROSS_GATES.index("ref_texture")] = lt * m[..., 0]
         tgt[..., CROSS_GATES.index("text_colour")] = (1 - flags[:, 1].float()).view(b, 1).to(g.device)
         tgt[..., CROSS_GATES.index("text_material")] = (1 - flags[:, 2].float()).view(b, 1).to(g.device)
         total = total + F.mse_loss(g.float(), tgt)

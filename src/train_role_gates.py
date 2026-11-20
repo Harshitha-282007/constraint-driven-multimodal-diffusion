@@ -24,6 +24,9 @@ close (L_keep); text colour / material act through neutral-caption channels (rol
 pooled embedding; the reference prior keeps each layer's initial level; the contour term is down-weighted (0.1),
 because on the 32-latent decode it gave no usable signal.
 
+v3 (after v2 kept the stated colour): flagged conflicts start with that text channel closed (gates.FLAG_INIT),
+and the reference colour channel starts stronger in the up-blocks (gates.REF_COLOUR_INIT).
+
 Phases (optimizer steps): 0-150 warm-up (normal + drop rows, diff + prior), 150-450 all rows + attribute losses
 (every 2nd micro-step, t in [200, 600]), 450-600 + swap loss (every 4th micro-step, hue pair batched with its
 original in one UNet call - required because gradient checkpointing re-runs the processors during backward).
@@ -56,7 +59,7 @@ HUE_DEGREES = (90, 150, 210, 270)
 W = dict(attr=0.5, swap=0.2, prior=0.5, prior_floor=0.2, keep=0.1, reg=0.01)    # prior_floor: fraction kept after the anneal
 ATTR_W = dict(colour=1.0, texture=1.0, contour=0.1, identity=1.0)
 SKETCH_LR = 0.2                                                                   # sketch gates' lr multiplier
-VERSION = 2
+VERSION = 3
 PHASES = dict(warm=150, conflict=450, total=600)
 FLAG_KEYS = ("g_obj", "g_col", "g_mat")
 

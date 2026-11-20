@@ -65,9 +65,16 @@ def test_torch_lab_matches_numpy():
 
 
 def test_gate_init_and_cond():
-    gs = G.CrossGate(32, style=True)
+    gs = G.CrossGate(32, style=True, name=G.STYLE_PREFIX + ".transformer_blocks.0.attn2.processor")
     g = gs(torch.randn(2, 5, 32), torch.zeros(2, G.COND_DIM))
-    assert torch.allclose(g, torch.ones_like(g), atol=1e-6)
+    keep = [0, 1, 2, 3, 5]                                                                     # text gates + ref texture
+    assert torch.allclose(g[..., keep], torch.ones_like(g[..., keep]), atol=1e-6)
+    assert torch.allclose(g[..., 4], torch.full_like(g[..., 4], G.REF_COLOUR_INIT[G.STYLE_PREFIX]), atol=1e-5)
+    # a flagged colour conflict starts with the text colour channel nearly closed, the other text gates open
+    gf = gs(torch.randn(1, 5, 32), G.cond_vector(torch.tensor([[0., 1, 0]]), torch.tensor([500])))
+    assert (gf[..., 2] < 0.15).all() and torch.allclose(gf[..., 0], torch.ones(1, 5), atol=1e-6)
+    assert G.ref_init("up_blocks.0.attentions.2.transformer_blocks.3.attn2.processor") == (0.5, G.REF_OFF_INIT)
+    assert G.ref_init("down_blocks.2.attentions.0.transformer_blocks.0.attn2.processor") == (G.REF_OFF_INIT, G.REF_OFF_INIT)
     go = G.CrossGate(32, style=False)(torch.randn(1, 5, 32), torch.zeros(1, G.COND_DIM))
     assert torch.allclose(go[..., :4], torch.ones(1, 5, 4)) and torch.allclose(go[..., 4:], torch.full((1, 5, 2), G.REF_OFF_INIT), atol=1e-6)
     sk = G.SketchGate(8)(torch.randn(1, 8, 4, 4), torch.zeros(1, G.COND_DIM))
@@ -97,7 +104,9 @@ def test_gated_processor_matches_ip_adapter_at_init():
         ref = ip(attn, h, encoder_hidden_states=(text, [ip_tokens]))
         gates = G.RoleGates({"up_blocks.0.attentions.1.x.attn2.processor": 64}, [])
         gates.set_context(torch.zeros(2, 3), torch.tensor([10, 10]), torch.zeros(2, 77, dtype=torch.long), 0.7)
-        proc = G.GatedCrossAttnProcessor("p", gates.cross[G._key("up_blocks.0.attentions.1.x.attn2.processor")],
+        cg = gates.cross[G._key("up_blocks.0.attentions.1.x.attn2.processor")]
+        cg.w_c.bias[G.CROSS_GATES.index("ref_colour")] = 0.0                       # neutral gate (v3 starts the colour channel at 1.5)
+        proc = G.GatedCrossAttnProcessor("p", cg,
                                          ip.to_k_ip[0], ip.to_v_ip[0], gates.ctx)
         out = proc(attn, h, encoder_hidden_states=(text, [ip_tokens]))
         assert torch.allclose(out, ref, atol=1e-5)

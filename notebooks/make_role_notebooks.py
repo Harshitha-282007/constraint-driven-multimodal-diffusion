@@ -9,7 +9,7 @@ DRIVE_ROOT = "/content/drive/MyDrive/sketchy_dataset_one_sketch"
 ZIP_PATH = f"{DRIVE_ROOT}/pilot_v1.zip"
 LOCAL_DATA = "/content/pilot_v1"
 GOV_DIR = f"{DRIVE_ROOT}/governance"            # governance.pt (notebook 05) lives here
-ROLE_DIR = f"{GOV_DIR}/role_gates_v2"            # role_gates.pt (notebook 08) lives here (v1 run kept in role_gates/)
+ROLE_DIR = f"{GOV_DIR}/role_gates_v3"            # role_gates.pt (notebook 08) lives here (earlier runs: role_gates/, role_gates_v2/)
 # The code lives in the repo's src/ folder (cloned below). To use a copy on Drive instead, set REPO_DIR to it.
 REPO_URL = "https://github.com/Harshitha-282007/IE643_final.git"
 REPO_BRANCH = "governed-pipeline"
@@ -138,7 +138,7 @@ from pipeline import Pipeline, seed_for
 from router import RouterEnsemble
 from rolegate.gates import RoleGates, gate_maps, CROSS_GATES, ALL_GATES
 
-RUN = "role_gates_v2"
+RUN = "role_gates_v3"
 OUT = f"{DRIVE_ROOT}/sdxl_runs/{RUN}"
 RES, STEPS, SEED = 640, 20, 0
 MAX_PHOTOS = 10                      # first pass on 10 test photos (50 items); set None for all 20 - the run is resumable

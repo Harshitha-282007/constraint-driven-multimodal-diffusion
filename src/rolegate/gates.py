@@ -38,6 +38,23 @@ ALL_GATES = CROSS_GATES + SKETCH_GATES
 COND_DIM = 7
 STYLE_PREFIX = "up_blocks.0.attentions.1"            # InstantStyle's style block for SDXL
 REF_OFF_INIT = 0.1                                   # initial reference gate outside the style block
+# v3: the reference governs colour, so its colour channel starts stronger than InstantStyle's single style block.
+# The colour channel (E(flat) + E(ref) - E(grey ref)) carries little layout, so it may also act in the neighbouring
+# up-block attentions; the texture channel keeps InstantStyle's placement.
+REF_COLOUR_INIT = {STYLE_PREFIX: 1.5, "up_blocks.0.attentions.0": 0.5, "up_blocks.0.attentions.2": 0.5}
+# v3: a flagged conflict starts by closing that text channel (logit shift per unit flag). With zero-initialised flag
+# weights the v2 run could move the logit by only ~0.3 in 600 steps at lr 5e-4, so the text-colour gate stopped near
+# 0.6 and the stated colour still won. Training refines these weights from here.
+FLAG_INIT = -3.0
+
+
+def ref_init(name, style=None):
+    """Initial (ref_colour, ref_texture) gate of the attn2 layer `name`."""
+    style = name.startswith(STYLE_PREFIX) if style is None else style
+    col = next((v for k, v in REF_COLOUR_INIT.items() if name.startswith(k)), None)
+    if col is None:
+        col = REF_COLOUR_INIT[STYLE_PREFIX] if style else REF_OFF_INIT
+    return col, (1.0 if style else REF_OFF_INIT)
 
 
 def _logit_for(g):                                   # g = 2*sigmoid(b)  ->  b
@@ -66,15 +83,18 @@ class GateContext:
 
 
 class CrossGate(nn.Module):
-    def __init__(self, channels, style=False):
+    def __init__(self, channels, style=False, name=""):
         super().__init__()
         self.norm = nn.LayerNorm(channels, elementwise_affine=False)
         self.w_h = nn.Linear(channels, len(CROSS_GATES), bias=False)
         self.w_c = nn.Linear(COND_DIM, len(CROSS_GATES))
         nn.init.zeros_(self.w_h.weight); nn.init.zeros_(self.w_c.weight)
-        b0 = [0.0] * len(TEXT_GATES) + [_logit_for(1.0 if style else REF_OFF_INIT)] * len(REF_GATES)
+        rc, rt = ref_init(name, style)
+        b0 = [0.0] * len(TEXT_GATES) + [_logit_for(rc), _logit_for(rt)]
         with torch.no_grad():
             self.w_c.bias.copy_(torch.tensor(b0))
+            self.w_c.weight[CROSS_GATES.index("text_colour"), 1] = FLAG_INIT      # cond[:, 1] = colour flag
+            self.w_c.weight[CROSS_GATES.index("text_material"), 2] = FLAG_INIT    # cond[:, 2] = material flag
 
     def forward(self, h, cond):
         """h (B,N,C), cond (B,COND_DIM) -> gates (B,N,6) in (0,2)."""
@@ -104,6 +124,8 @@ class PooledGate(nn.Module):
         super().__init__()
         self.w_c = nn.Linear(COND_DIM, 2)
         nn.init.zeros_(self.w_c.weight); nn.init.zeros_(self.w_c.bias)
+        with torch.no_grad():
+            self.w_c.weight[0, 1] = FLAG_INIT; self.w_c.weight[1, 2] = FLAG_INIT
 
     def forward(self, cond):
         return 2 * torch.sigmoid(self.w_c(cond.float()))          # (B,2): colour, material
@@ -223,7 +245,7 @@ class RoleGates(nn.Module):
         (the down residuals in order, then the mid block)."""
         super().__init__()
         self.cfg = dict(cross_channels=dict(cross_channels), res_channels=list(res_channels))
-        self.cross = nn.ModuleDict({_key(n): CrossGate(c, style=n.startswith(STYLE_PREFIX)) for n, c in cross_channels.items()})
+        self.cross = nn.ModuleDict({_key(n): CrossGate(c, style=n.startswith(STYLE_PREFIX), name=n) for n, c in cross_channels.items()})
         self.sketch = nn.ModuleList([SketchGate(c) for c in res_channels])
         self.pooled = PooledGate()
         self.ctx = GateContext()
