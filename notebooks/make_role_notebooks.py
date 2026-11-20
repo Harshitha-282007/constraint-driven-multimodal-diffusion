@@ -21,6 +21,8 @@ from google.colab import drive
 drive.mount("/content/drive")
 if not os.path.isdir(REPO_DIR):
     !git clone -q -b {REPO_BRANCH} {REPO_URL} {REPO_DIR}
+else:
+    !git -C {REPO_DIR} pull -q   # restart the session after a pull that changes src/ (modules are cached)
 assert os.path.exists(f"{REPO_DIR}/src/train_role_gates.py"), "src/train_role_gates.py not found: push the new code or point REPO_DIR at it"
 sys.path.insert(0, f"{REPO_DIR}/src")
 os.makedirs(ROLE_DIR, exist_ok=True)
