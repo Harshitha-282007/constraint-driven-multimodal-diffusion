@@ -7,12 +7,13 @@ Training losses for the role gates. Everything here is differentiable torch (ima
     contour_loss       sketch-edge recall + penalty for edges off the sketch                     (sketch governs shape)
     identity_loss      CLIP hinge: closer to the caption's object than to the reference's object (text governs identity)
     swap_loss          two references, same text/sketch/noise: edges and identity must agree     (only colour may change)
-    prior_loss         gates pulled toward the rules (annealed to 0)
+    prior_loss         gates pulled toward the rules (annealed to a floor)
+    keep_loss          sketch gates may open but not close: the sketch always governs shape and placement
 """
 import torch
 import torch.nn.functional as F
 
-from .gates import CROSS_GATES
+from .gates import CROSS_GATES, REF_OFF_INIT, STYLE_PREFIX
 
 _M = torch.tensor([[0.4124564, 0.3575761, 0.1804375], [0.2126729, 0.7151522, 0.0721750], [0.0193339, 0.1191920, 0.9503041]])
 _WHITE = torch.tensor([0.95047, 1.0, 1.08883])
@@ -80,29 +81,43 @@ def swap_loss(img_a, img_b, emb_a, emb_b, mask):
 
 
 def prior_loss(collected, obj_mask, flags):
-    """Pull cross-attention gates toward the rules.
+    """Pull the gates toward the rules.
 
-    collected: [(name, gates (B,N,6))] from GateContext.collect; obj_mask (B,1,H,W) in {0,1}; flags (B,3) rule
-    labels (object, colour, material). Targets: reference gates 1 on the object and 0 off it; text colour / material
-    gates 0 when that attribute is in conflict (else 1); text identity and other 1. Sketch gates are not pulled.
+    collected: [(name, gates)] from GateContext.collect (cross-attention (B,N,6), pooled (B,), ControlNet ignored);
+    obj_mask (B,1,H,W) in {0,1}; flags (B,3) rule labels (object, colour, material). Targets: text colour / material
+    gates 0 when that attribute is in conflict (else 1); text identity and other 1; reference gates at their layer's
+    initial level on the object (1 in the style block, REF_OFF_INIT elsewhere: full IP-Adapter strength in every
+    layer leaks the reference's layout and identity) and 0 off it.
     """
     total, n = 0.0, 0
     for name, g in collected:
         if name.startswith("controlnet"):
+            continue
+        if name.startswith("pooled."):
+            col = 1 if name.endswith("colour") else 2
+            total = total + F.mse_loss(g.float(), (1 - flags[:, col].float()).to(g.device))
+            n += 1
             continue
         b, nq, _ = g.shape
         s = int(round(nq ** 0.5))
         if s * s != nq:
             continue
         m = F.interpolate(obj_mask.float(), size=(s, s), mode="area").view(b, nq, 1).to(g.device)
+        lvl = 1.0 if name.startswith(STYLE_PREFIX) else REF_OFF_INIT
         tgt = torch.ones_like(g)
-        tgt[..., CROSS_GATES.index("ref_colour")] = m[..., 0]
-        tgt[..., CROSS_GATES.index("ref_texture")] = m[..., 0]
+        tgt[..., CROSS_GATES.index("ref_colour")] = lvl * m[..., 0]
+        tgt[..., CROSS_GATES.index("ref_texture")] = lvl * m[..., 0]
         tgt[..., CROSS_GATES.index("text_colour")] = (1 - flags[:, 1].float()).view(b, 1).to(g.device)
         tgt[..., CROSS_GATES.index("text_material")] = (1 - flags[:, 2].float()).view(b, 1).to(g.device)
         total = total + F.mse_loss(g.float(), tgt)
         n += 1
     return total / max(n, 1)
+
+
+def keep_loss(collected, floor=0.9):
+    """Penalise ControlNet residual gates below `floor` (squared hinge, mean over pixels and residuals)."""
+    vals = [F.relu(floor - g.float()).pow(2).mean() for name, g in collected if name.startswith("controlnet")]
+    return torch.stack(vals).mean() if vals else torch.zeros(())
 
 
 def reg_loss(gates_module, init_state):

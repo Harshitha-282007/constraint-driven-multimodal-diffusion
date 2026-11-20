@@ -25,7 +25,7 @@ import torch.nn.functional as F
 from PIL import Image, ImageOps
 
 from governance.features import ClipL, build_x, letterbox, object_phrase, on_white, ref_for_clip, sketch_for_clip, to_grey
-from rolegate.tokens import token_groups
+from rolegate.tokens import neutral_caption, token_groups
 
 BASE_ID = "stabilityai/stable-diffusion-xl-base-1.0"
 VAE_ID = "madebyollin/sdxl-vae-fp16-fix"
@@ -162,7 +162,9 @@ class Pipeline:
         All captions and references are encoded in one pass. Each item gets everything `run` needs plus `x`,
         the governance-network input.
         """
-        caps = list(dict.fromkeys(s["caption"] for s in specs))
+        tok = self.pipe.tokenizer
+        neu = {c: {w: neutral_caption(tok, c, w) for w in ("colour", "material")} for c in dict.fromkeys(s["caption"] for s in specs)}
+        caps = list(dict.fromkeys([s["caption"] for s in specs] + [n for d in neu.values() for n in d.values() if n]))
         refs = [prep_ref(s["ref"], self.res) for s in specs]
         txt, ips = self.encode(caps, refs + [to_grey(r) for r in refs])
         txt = dict(zip(caps, txt))
@@ -181,7 +183,9 @@ class Pipeline:
             if s.get("attr"):
                 it["attr"], it["attr_emb"] = s["attr"], self.clip.text([s["attr"]])[0]
             it["ref_object"] = s.get("ref_object") or "object"
-            it["text_groups"] = token_groups(self.pipe.tokenizer, s["caption"], obj)
+            it["text_groups"] = token_groups(tok, s["caption"], obj)
+            # caption with colour / material words neutralised: (prompt embeds, pooled) or None
+            it["txt_neutral"] = {w: (txt[n][0], txt[n][2]) if n else None for w, n in neu[s["caption"]].items()}
             items.append(it)
         return items
 
@@ -237,6 +241,10 @@ class Pipeline:
         ipe = [torch.cat([torch.zeros_like(emb), emb]).to(dev, dt)]
         groups = torch.tensor([[0] * 77, list(it["text_groups"])], device=dev, dtype=torch.long)
         fl = torch.tensor([list(flags)] * 2, device=dev, dtype=torch.float32)
+        tn, pn = {}, {}
+        for w, v in (it.get("txt_neutral") or {}).items():               # unconditional half: negative prompt itself
+            tn[w] = None if v is None else torch.cat([npe, v[0].to(dev)])
+            pn[w] = None if v is None else torch.cat([nppe, v[1].to(dev)])
         ctrl = pipe.prepare_image(image=it["sketch"], width=res, height=res, batch_size=1, num_images_per_prompt=1,
                                   device=dev, dtype=dt, do_classifier_free_guidance=True, guess_mode=False)
         pipe.scheduler.set_timesteps(self.steps, device=dev)
@@ -251,8 +259,9 @@ class Pipeline:
             for i, t in enumerate(ts):
                 f = i / len(ts)
                 cs, ips = p["cs"] * cs_shape(f, p["hold"]), p["ip"] * ip_shape(f)
-                role.set_context(fl, t.view(1).repeat(2).to(dev), groups, ips, knock, freeze_text)
+                role.set_context(fl, t.view(1).repeat(2).to(dev), groups, ips, knock, freeze_text, text_neutral=tn)
                 role.ctx.record = {} if record_at is not None and i == record_at else None
+                added = {"text_embeds": role.mix_pooled(pooled, pn.get("colour"), pn.get("material")), "time_ids": tids}
                 li = pipe.scheduler.scale_model_input(torch.cat([lat] * 2), t)
                 down, mid = pipe.controlnet(li, t, encoder_hidden_states=pr, controlnet_cond=ctrl, conditioning_scale=float(cs),
                                             guess_mode=False, added_cond_kwargs=added, return_dict=False)

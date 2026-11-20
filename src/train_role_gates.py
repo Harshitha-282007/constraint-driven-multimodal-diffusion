@@ -17,7 +17,12 @@ Training data (125 clean training photos; the correct output is known for every 
 Gates are conditioned on the governance network's PREDICTED flags (notebook 05), so training sees detector errors;
 the prior loss uses the rule labels.
 
-    L = L_diff(masked) + 0.5 L_attr + 0.2 L_swap + 0.1 L_prior (annealed to 0 by step 450) + 0.01 L_reg
+    L = L_diff(masked) + 0.5 L_attr + 0.2 L_swap + 0.5 L_prior (annealed to 0.1 by step 450) + 0.1 L_keep + 0.01 L_reg
+
+v2 (after the first run): sketch gates read layer-normalised residuals, train at 0.2x the learning rate and may not
+close (L_keep); text colour / material act through neutral-caption channels (rolegate/gates.py), including the
+pooled embedding; the reference prior keeps each layer's initial level; the contour term is down-weighted (0.1),
+because on the 32-latent decode it gave no usable signal.
 
 Phases (optimizer steps): 0-150 warm-up (normal + drop rows, diff + prior), 150-450 all rows + attribute losses
 (every 2nd micro-step, t in [200, 600]), 450-600 + swap loss (every 4th micro-step, hue pair batched with its
@@ -48,8 +53,10 @@ from rolegate.gates import RoleGates
 from train_fusion_lora import load_rows
 
 HUE_DEGREES = (90, 150, 210, 270)
-W = dict(attr=0.5, swap=0.2, prior=0.1, reg=0.01)
-ATTR_W = dict(colour=1.0, texture=1.0, contour=0.5, identity=1.0)
+W = dict(attr=0.5, swap=0.2, prior=0.5, prior_floor=0.2, keep=0.1, reg=0.01)    # prior_floor: fraction kept after the anneal
+ATTR_W = dict(colour=1.0, texture=1.0, contour=0.1, identity=1.0)
+SKETCH_LR = 0.2                                                                   # sketch gates' lr multiplier
+VERSION = 2
 PHASES = dict(warm=150, conflict=450, total=600)
 FLAG_KEYS = ("g_obj", "g_col", "g_mat")
 
@@ -114,13 +121,14 @@ def prepare(P, specs, net, log=print, chunk=16):
                 flags_pred=torch.tensor([pred[k] for k in FLAG_KEYS]), flags_rule=torch.tensor([float(s["rule"][k]) for k in FLAG_KEYS]),
                 lat=lat, ctrl=ctrl_cache[s["base"]], mask_lat=_mask_t(s["mask"], res // 8, dilate=2), mask256=_mask_t(s["mask"], 256),
                 tgt256=_img_t(s["target"], 256).half(), sk256=P._soft_sketch(it["sketch"], 256).cpu(),
-                obj_emb=it["clip"]["obj"].float(), ref_obj_emb=ro.float()))
+                obj_emb=it["clip"]["obj"].float(), ref_obj_emb=ro.float(), txt_neu=it["txt_neutral"]))
             it.pop("S_gh", None)
         del items; torch.cuda.empty_cache()
     kinds = {}
     for d in data:
         kinds[d["kind"]] = kinds.get(d["kind"], 0) + 1
-    log(f"prepared {len(data)} samples {kinds} | {len(ctrl_cache)} sketches")
+    n_neu = {w: sum(d["txt_neu"][w] is not None for d in data) for w in ("colour", "material")}
+    log(f"prepared {len(data)} samples {kinds} | {len(ctrl_cache)} sketches | neutral captions {n_neu}")
     return data
 
 
@@ -144,10 +152,16 @@ def forward(P, role, batch, sched, t, drop=False, need_x0=False):
         emb = torch.cat([d["emb"] for d in batch]).to(dev, dt)
     flags = torch.stack([d["flags_pred"] for d in batch]).to(dev)
     tids = torch.tensor([[res, res, 0, 0, res, res]], device=dev, dtype=dt).repeat(B, 1)
-    added = {"text_embeds": pooled, "time_ids": tids}
+    tn, pn = {}, {}
+    if not drop:                                       # neutral-caption channels; rows without one use their own caption
+        for w in ("colour", "material"):
+            if any(d["txt_neu"][w] is not None for d in batch):
+                tn[w] = torch.cat([(d["txt_neu"][w] or (d["txt"][0], d["txt"][2]))[0] for d in batch]).to(dev)
+                pn[w] = torch.cat([(d["txt_neu"][w] or (d["txt"][0], d["txt"][2]))[1] for d in batch]).to(dev)
     cs, ips = CENTER["cs"] * cs_shape(f, CENTER["hold"]), CENTER["ip"] * ip_shape(f)    # same base schedule as inference
-    role.set_context(flags, tt, groups, ips)
+    role.set_context(flags, tt, groups, ips, text_neutral=tn)
     role.ctx.collect = []
+    added = {"text_embeds": role.mix_pooled(pooled, pn.get("colour"), pn.get("material")), "time_ids": tids}
     ctrl = torch.cat([d["ctrl"] for d in batch]).to(dev, dt)
     with torch.autocast("cuda", dtype=torch.float16):
         with torch.no_grad():
@@ -205,7 +219,9 @@ def train(data_dir, gov_path, out_dir, res=512, lr=5e-4, accum=4, phases=PHASES,
     role = RoleGates.for_unet(P.unet, P.controlnet_res_channels()).to(dev).float()
     init = {k: v.detach().clone() for k, v in role.named_parameters()}
     params = list(role.parameters())
-    opt = torch.optim.AdamW(params, lr=lr, weight_decay=0.0)
+    sk_ids = {id(p) for p in role.sketch.parameters()}
+    opt = torch.optim.AdamW([dict(params=[p for p in params if id(p) not in sk_ids], lr=lr),
+                             dict(params=list(role.sketch.parameters()), lr=lr * SKETCH_LR)], weight_decay=0.0)
     scaler = torch.cuda.amp.GradScaler()
     sched = DDPMScheduler.from_pretrained(BASE_ID, subfolder="scheduler")
     T = sched.config.num_train_timesteps
@@ -238,10 +254,11 @@ def train(data_dir, gov_path, out_dir, res=512, lr=5e-4, accum=4, phases=PHASES,
                 lat = torch.cat([d["lat"] for d in batch]).to(dev)
                 mlat = torch.cat([d["mask_lat"] for d in batch]).to(dev)
                 parts = dict(diff=LS.masked_diffusion(pred, noise, mlat))
-                prior_w = W["prior"] * max(0.0, 1 - step / phases["conflict"])
+                prior_w = W["prior"] * max(W["prior_floor"], 1 - step / phases["conflict"])
                 if prior_w > 0 and not drop:
                     m = torch.cat([d["mask256"] for d in batch]).to(dev)
                     parts["prior"] = prior_w * LS.prior_loss(coll, m, torch.stack([d["flags_rule"] for d in batch]).to(dev))
+                parts["keep"] = W["keep"] * LS.keep_loss(coll).to(dev)
                 parts["reg"] = W["reg"] * LS.reg_loss(role, init)
                 if do_attr:
                     img = decode_x0(P, sched, noisy, pred, t.repeat(len(batch)))
@@ -264,7 +281,7 @@ def train(data_dir, gov_path, out_dir, res=512, lr=5e-4, accum=4, phases=PHASES,
                 rec = hist[-10 * accum:]
                 mean = lambda k: np.nanmean([h.get(k, np.nan) for h in rec]) if any(k in h for h in rec) else float("nan")
                 log(f"step {step:4d}/{total} [{phase}] loss {mean('loss'):.4f} diff {mean('diff'):.4f} attr {mean('attr'):.4f} "
-                    f"swap {mean('swap'):.4f} prior {mean('prior'):.4f} | peak GPU {torch.cuda.max_memory_allocated() / 1e9:.2f} GB | "
+                    f"swap {mean('swap'):.4f} prior {mean('prior'):.4f} keep {mean('keep'):.4f} | peak GPU {torch.cuda.max_memory_allocated() / 1e9:.2f} GB | "
                     f"{(time.time() - t0) / 60:.1f} min")
             if not memory_test and step % save_every == 0:
                 role.save(os.path.join(out_dir, f"role_gates_step{step:04d}.pt"), dict(step=step))
@@ -276,7 +293,7 @@ def train(data_dir, gov_path, out_dir, res=512, lr=5e-4, accum=4, phases=PHASES,
     if memory_test:
         log(f"MEMORY TEST OK at res={res}: peak {torch.cuda.max_memory_allocated() / 1e9:.2f} GB")
     else:
-        cfg = dict(res=res, lr=lr, accum=accum, phases=phases, weights=W, attr_weights=ATTR_W, n_samples=len(data),
+        cfg = dict(version=VERSION, sketch_lr=SKETCH_LR, res=res, lr=lr, accum=accum, phases=phases, weights=W, attr_weights=ATTR_W, n_samples=len(data),
                    kinds={k: sum(d["kind"] == k for d in data) for k in ("normal", "col", "mat", "hue")}, minutes=(time.time() - t0) / 60)
         role.save(os.path.join(out_dir, "role_gates.pt"), dict(step=step, train_cfg=cfg))
         json.dump(cfg, open(os.path.join(out_dir, "role_gates_config.json"), "w"), indent=1)

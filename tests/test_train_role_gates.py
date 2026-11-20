@@ -113,7 +113,8 @@ def test_tiny_forward_backward_reaches_every_gate_group():
                     flags_pred=torch.tensor([0.1, 0.9, 0.2]), flags_rule=torch.tensor([0., 1, 0]),
                     mask_lat=torch.ones(1, 1, 16, 16), mask256=m, tgt256=torch.rand(1, 3, 256, 256, generator=g), sk256=m,
                     obj_emb=torch.nn.functional.normalize(torch.randn(8, generator=g), dim=0),
-                    ref_obj_emb=torch.nn.functional.normalize(torch.randn(8, generator=g), dim=0))
+                    ref_obj_emb=torch.nn.functional.normalize(torch.randn(8, generator=g), dim=0),
+                    txt_neu={"colour": (torch.randn(1, 77, D, generator=g), torch.randn(1, D, generator=g)), "material": None})
 
     batch = [sample(0), sample(1)]
     sched = DDPMScheduler(num_train_timesteps=1000)
@@ -128,7 +129,8 @@ def test_tiny_forward_backward_reaches_every_gate_group():
         img = TR.decode_x0(P, sched, noisy, pred, t.repeat(2))
         assert img.shape == (2, 3, 256, 256)
         la, parts, emb = TR.attr_losses(P, img, batch)
-        loss = loss + la + LS.swap_loss(img[:1], img[1:], emb[:1], emb[1:], batch[0]["mask256"])
+        assert any(n == "pooled.text_colour" for n, _ in coll)
+        loss = loss + la + LS.swap_loss(img[:1], img[1:], emb[:1], emb[1:], batch[0]["mask256"]) + LS.keep_loss(coll)
         role.ctx.collect = None
         loss.backward()
         # drop rows must also run (negative prompt, zero reference)
@@ -140,4 +142,45 @@ def test_tiny_forward_backward_reaches_every_gate_group():
     gb = torch.stack([m.w_c.bias.grad for m in cross]).abs().sum(0)          # (6,) per gate group
     assert (gb > 0).all(), gb
     assert all(g.conv.weight.grad is not None and g.conv.weight.grad.abs().sum() > 0 for g in role.sketch)
+    assert role.pooled.w_c.bias.grad is not None and role.pooled.w_c.bias.grad[0].abs() > 0      # colour pooled gate
+    # material has no neutral caption here, so its pooled gate gets nothing
     assert all(type(p).__name__ != "GatedCrossAttnProcessor" for p in unet.attn_processors.values())
+
+
+class _Tok:
+    """Stand-in for the CLIP BPE tokenizer: lower-cases, splits words, 'beige' is two pieces."""
+    def tokenize(self, text):
+        import re
+        out = []
+        for w in re.findall(r"[a-z]+|[^a-z\s]", text.lower()):
+            out += ["bei", "ge</w>"] if w == "beige" else [w + "</w>"]
+        return out
+
+
+def test_neutral_caption_keeps_token_positions():
+    from rolegate.tokens import neutral_caption, token_groups, COLOUR
+    tok = _Tok()
+    cap = "A red mug with a beige wooden handle."
+    nc = neutral_caption(tok, cap, "colour")
+    assert nc == "A colored mug with a colored colored wooden handle."
+    assert len(tok.tokenize(nc)) == len(tok.tokenize(cap))
+    assert neutral_caption(tok, cap, "material") == "A red mug with a beige solid handle."
+    assert neutral_caption(tok, "A mug.", "colour") is None
+    g = token_groups(tok, cap, "mug")
+    assert g[2] == COLOUR and g[6] == COLOUR and g[7] == COLOUR
+
+
+def test_gate_maps_include_sketch_groups():
+    import torch
+    from rolegate.gates import gate_maps
+    rec = {"down.attn2": torch.rand(2, 16, 6), "controlnet.0": torch.rand(2, 1, 8, 8), "controlnet.1": torch.rand(2, 1, 8, 8),
+           "controlnet.2": torch.rand(2, 1, 4, 4), "controlnet.3": torch.rand(2, 1, 2, 2)}
+    gm = gate_maps(rec)
+    assert gm["sketch_contour"].shape == (4, 4) and "sketch_placement" in gm and "text_colour" in gm
+
+
+def test_keep_loss_only_penalises_closing():
+    import torch
+    from rolegate import losses as LS
+    assert LS.keep_loss([("controlnet.0", torch.full((1, 1, 4, 4), 1.5))]) == 0
+    assert LS.keep_loss([("controlnet.0", torch.full((1, 1, 4, 4), 0.2))]) > 0

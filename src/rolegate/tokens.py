@@ -47,3 +47,32 @@ def token_groups(tokenizer, caption, category, max_len=77):
             word, start = "", pos + 1
         pos += 1
     return groups
+
+
+NEUTRAL = {"colour": "colored", "material": "solid"}
+
+
+def neutral_caption(tokenizer, caption, which):
+    """Caption with its colour (which="colour") or material (which="material") words replaced by a neutral word,
+    repeated so every word keeps its number of BPE tokens: all token positions stay aligned with `caption`.
+    Returns None when the caption has no such word or the alignment cannot be kept."""
+    words = _COLOUR_WORDS if which == "colour" else _MATERIAL_WORDS
+    neutral = NEUTRAL[which]
+    n_neu = len(tokenizer.tokenize(neutral))
+    hit = False
+
+    def sub(m):
+        nonlocal hit
+        w = m.group(0)
+        if w.lower() not in words:
+            return w
+        k = len(tokenizer.tokenize(w))
+        if k % n_neu:
+            return w
+        hit = True
+        return " ".join([neutral] * (k // n_neu))
+
+    out = re.sub(r"[A-Za-z]+", sub, caption)
+    if not hit or len(tokenizer.tokenize(out)) != len(tokenizer.tokenize(caption)):
+        return None
+    return out

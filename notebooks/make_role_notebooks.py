@@ -9,7 +9,7 @@ DRIVE_ROOT = "/content/drive/MyDrive/sketchy_dataset_one_sketch"
 ZIP_PATH = f"{DRIVE_ROOT}/pilot_v1.zip"
 LOCAL_DATA = "/content/pilot_v1"
 GOV_DIR = f"{DRIVE_ROOT}/governance"            # governance.pt (notebook 05) lives here
-ROLE_DIR = f"{GOV_DIR}/role_gates"               # role_gates.pt (notebook 08) lives here
+ROLE_DIR = f"{GOV_DIR}/role_gates_v2"            # role_gates.pt (notebook 08) lives here (v1 run kept in role_gates/)
 # The code lives in the repo's src/ folder (cloned below). To use a copy on Drive instead, set REPO_DIR to it.
 REPO_URL = "https://github.com/Harshitha-282007/IE643_final.git"
 REPO_BRANCH = "governed-pipeline"
@@ -68,7 +68,7 @@ P, _, _ = TR.train(DATA_DIR, GOV, f"{ROLE_DIR}/memtest", res=RES, memory_test=Tr
 print(open(f"{ROLE_DIR}/role_gates_config.json").read())'''),
 ("code", '''# ---- training curves ----
 H = pd.DataFrame(json.load(open(f"{ROLE_DIR}/train_log.json")))
-cols = [c for c in ["diff", "attr", "swap", "prior", "a_colour", "a_texture", "a_contour", "a_identity"] if c in H]
+cols = [c for c in ["diff", "attr", "swap", "prior", "keep", "a_colour", "a_texture", "a_contour", "a_identity"] if c in H]
 fig, ax = plt.subplots(2, (len(cols) + 1) // 2, figsize=(4 * ((len(cols) + 1) // 2), 6))
 for a, c in zip(ax.ravel(), cols):
     s = H.groupby("step")[c].mean().dropna()
@@ -79,7 +79,8 @@ plt.tight_layout(); plt.savefig(f"{ROLE_DIR}/train_curves.png", dpi=110); plt.sh
 print(H.groupby("phase")[cols].mean().round(4))'''),
 ("md", "## Before / after on held-out colour conflicts\nSame item, gates at initialisation (equivalent to the fixed pipeline with InstantStyle) vs trained gates. The trained model should follow the reference colour although the caption names another one; the gate maps show where each input acts."),
 ("code", '''from governance import labels as L, model as GM
-from rolegate.gates import RoleGates, gate_maps, CROSS_GATES
+from rolegate.gates import RoleGates, gate_maps, CROSS_GATES, SKETCH_GATES
+MAPS = CROSS_GATES + SKETCH_GATES
 from pipeline import seed_for
 P.res, P.steps = 640, 20
 net = GM.load(GOV)
@@ -90,7 +91,7 @@ items = P.make_items([dict(key=r["id"], sketch=op(r, "sketch"), ref=op(r, "refer
                            seed=seed_for(r["original_id"]), ref_object=r.get("ref_object")) for r in test])
 init = RoleGates.for_unet(P.unet, P.controlnet_res_channels())
 trained = RoleGates.load(f"{ROLE_DIR}/role_gates.pt", P.dev)
-fig, ax = plt.subplots(len(test), 4 + len(CROSS_GATES), figsize=(2.6 * (4 + len(CROSS_GATES)), 2.8 * len(test)))
+fig, ax = plt.subplots(len(test), 4 + len(MAPS), figsize=(2.6 * (4 + len(MAPS)), 2.8 * len(test)))
 for i, (r, it) in enumerate(zip(test, items)):
     gp = GM.predict_gates(net, it["x"]); fl = [gp["g_obj"], gp["g_col"], gp["g_mat"]]
     a, _ = P.run_role(it, init, fl)
@@ -98,7 +99,7 @@ for i, (r, it) in enumerate(zip(test, items)):
     gm = gate_maps(rec)
     for j, (im, t) in enumerate([(it["sketch"], "sketch"), (it["ref"], f"ref: {r['ref_colors']}"), (a, "gates at init"), (b, "trained gates")]):
         ax[i, j].imshow(im); ax[i, j].set_title(t, fontsize=8)
-    for j, g in enumerate(CROSS_GATES):
+    for j, g in enumerate(MAPS):
         ax[i, 4 + j].imshow(gm[g].numpy(), vmin=0, vmax=2, cmap="magma"); ax[i, 4 + j].set_title(g, fontsize=8)
     ax[i, 0].set_ylabel(r["caption"][:40], fontsize=7)
 for x in ax.ravel(): x.set_xticks([]); x.set_yticks([])
@@ -135,7 +136,7 @@ from pipeline import Pipeline, seed_for
 from router import RouterEnsemble
 from rolegate.gates import RoleGates, gate_maps, CROSS_GATES, ALL_GATES
 
-RUN = "role_gates_v1"
+RUN = "role_gates_v2"
 OUT = f"{DRIVE_ROOT}/sdxl_runs/{RUN}"
 RES, STEPS, SEED = 640, 20, 0
 MAX_PHOTOS = 10                      # first pass on 10 test photos (50 items); set None for all 20 - the run is resumable

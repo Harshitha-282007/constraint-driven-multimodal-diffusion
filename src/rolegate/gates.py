@@ -13,6 +13,16 @@ All gates read the UNet features at that point plus a conditioning vector c = [c
 material), timestep features], and are initialised so the network starts from the existing fixed-weight pipeline.
 
     g = 2 * sigmoid(b0 + W_h . LayerNorm(h) + W_c . c)        (W_h, W_c zero at init, so g = 2*sigmoid(b0))
+
+Text colour / material as channels (v2). CLIP's causal text encoder carries a colour word into every later token and
+into the pooled embedding, so scaling the colour word's own attention cannot remove the colour. The caption is
+therefore also encoded with its colour (material) words replaced by a neutral word at the same token positions, and
+the gate acts on the difference:
+
+    out = o(full) + (g_colour - 1) * (o(full) - o(colour-neutral)) + (g_material - 1) * (o(full) - o(material-neutral))
+
+so g = 0 gives the caption without its colour, g = 1 the caption as written. The pooled embedding gets the same
+treatment with a global gate that reads only the conditioning vector.
 """
 import math
 
@@ -52,6 +62,7 @@ class GateContext:
         self.freeze_text = False    # text gates fixed at 1 (ablation)
         self.collect = None         # list -> (name, gates) with grad, for the prior loss
         self.record = None          # dict -> name: gates (detached), for gate maps
+        self.text_neutral = None    # {"colour": (B,77,D) or None, "material": ...}: caption with those words neutralised
 
 
 class CrossGate(nn.Module):
@@ -71,6 +82,9 @@ class CrossGate(nn.Module):
 
 
 class SketchGate(nn.Module):
+    """Reads the ControlNet residual normalised per pixel over channels (as the cross gates normalise h): raw
+    residuals are large, and an unnormalised 1x1 conv saturated the gate to 0 / 2 pixel by pixel (v1 run)."""
+
     def __init__(self, channels):
         super().__init__()
         self.conv = nn.Conv2d(channels, 1, 1, bias=False)
@@ -79,7 +93,20 @@ class SketchGate(nn.Module):
 
     def forward(self, r, cond):
         """r (B,C,H,W) -> gate (B,1,H,W) in (0,2)."""
-        return 2 * torch.sigmoid(self.conv(r.float()) + self.w_c(cond.float())[:, :, None, None])
+        x = F.layer_norm(r.float().permute(0, 2, 3, 1), (r.shape[1],)).permute(0, 3, 1, 2)
+        return 2 * torch.sigmoid(self.conv(x) + self.w_c(cond.float())[:, :, None, None])
+
+
+class PooledGate(nn.Module):
+    """Global colour / material gates for SDXL's pooled text embedding (reads only the conditioning vector)."""
+
+    def __init__(self):
+        super().__init__()
+        self.w_c = nn.Linear(COND_DIM, 2)
+        nn.init.zeros_(self.w_c.weight); nn.init.zeros_(self.w_c.bias)
+
+    def forward(self, cond):
+        return 2 * torch.sigmoid(self.w_c(cond.float()))          # (B,2): colour, material
 
 
 class GatedCrossAttnProcessor(nn.Module):
@@ -135,12 +162,32 @@ class GatedCrossAttnProcessor(nn.Module):
         v = value.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
 
         # text: softmax over all tokens, then each token group's share scaled by its own gate
-        probs = (q.float() @ k.float().transpose(-1, -2) * attn.scale).softmax(-1)                  # (B,H,N,T)
         groups = self.ctx.text_groups.to(hidden_states.device)                                      # (B,T)
-        n_tok = probs.shape[-1]
+        neutral = self.ctx.text_neutral or {}
+        if any(v_ is not None for v_ in neutral.values()):
+            # colour / material act through the neutral-caption channels; their word slots count as 'other'
+            groups = torch.where(groups >= TEXT_GATES.index("text_colour"), torch.zeros_like(groups), groups)
         tg = g[..., :len(TEXT_GATES)]                                                               # (B,N,4)
+        n_tok = k.shape[2]
         w = tg.gather(2, groups[:, None, :n_tok].expand(-1, tg.shape[1], -1))                       # (B,N,T)
-        out = ((probs * w[:, None]).to(v.dtype) @ v).transpose(1, 2).reshape(batch_size, -1, inner_dim)
+
+        def text_attn(kk, vv):
+            probs = (q.float() @ kk.float().transpose(-1, -2) * attn.scale).softmax(-1)             # (B,H,N,T)
+            return ((probs * w[:, None]).to(vv.dtype) @ vv).transpose(1, 2).reshape(batch_size, -1, inner_dim)
+
+        text_full = text_attn(k, v)
+        out = text_full
+        for gname, key_ in (("text_colour", "colour"), ("text_material", "material")):
+            e = neutral.get(key_)
+            if e is None:
+                continue
+            e = e.to(hidden_states.device, encoder_hidden_states.dtype)
+            if attn.norm_cross:
+                e = attn.norm_encoder_hidden_states(e)
+            kn = attn.to_k(e).view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+            vn = attn.to_v(e).view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+            gi = CROSS_GATES.index(gname)
+            out = out + (g[..., gi:gi + 1] - 1).to(v.dtype) * (text_full - text_attn(kn, vn))
 
         # reference: one attention per channel, each with its own gate
         scale = float(self.ctx.ip_scale)
@@ -178,6 +225,7 @@ class RoleGates(nn.Module):
         self.cfg = dict(cross_channels=dict(cross_channels), res_channels=list(res_channels))
         self.cross = nn.ModuleDict({_key(n): CrossGate(c, style=n.startswith(STYLE_PREFIX)) for n, c in cross_channels.items()})
         self.sketch = nn.ModuleList([SketchGate(c) for c in res_channels])
+        self.pooled = PooledGate()
         self.ctx = GateContext()
         self._orig = None
 
@@ -207,12 +255,27 @@ class RoleGates(nn.Module):
             self._orig = None
 
     # ---------------------------------------------------------------- context
-    def set_context(self, flags, t, text_groups, ip_scale, knock=(), freeze_text=False):
+    def set_context(self, flags, t, text_groups, ip_scale, knock=(), freeze_text=False, text_neutral=None):
         self.ctx.cond = cond_vector(flags, t)
         self.ctx.text_groups = text_groups
+        self.ctx.text_neutral = text_neutral
         self.ctx.ip_scale = ip_scale
         self.ctx.knock = set(knock)
         self.ctx.freeze_text = freeze_text
+
+    def mix_pooled(self, pooled, pooled_colour=None, pooled_material=None):
+        """Pooled text embedding with the global colour / material gates applied (call after set_context)."""
+        g = self.pooled(self.ctx.cond.to(pooled.device))                                  # (B,2)
+        if self.ctx.freeze_text:
+            g = torch.ones_like(g)
+        for i, (name, pn) in enumerate((("text_colour", pooled_colour), ("text_material", pooled_material))):
+            if pn is None:
+                continue
+            gi = torch.zeros_like(g[:, i]) if name in self.ctx.knock else g[:, i]
+            if self.ctx.collect is not None:
+                self.ctx.collect.append((f"pooled.{name}", gi))
+            pooled = pooled + (gi[:, None] - 1).to(pooled.dtype) * (pooled - pn.to(pooled.device, pooled.dtype))
+        return pooled
 
     # ---------------------------------------------------------------- ControlNet residuals
     def sketch_groups(self, shapes):
@@ -244,15 +307,18 @@ class RoleGates(nn.Module):
     def load(cls, path, device="cpu"):
         ck = torch.load(path, map_location="cpu", weights_only=False)
         m = cls(**ck["cfg"])
-        m.load_state_dict(ck["state"])
+        missing, unexpected = m.load_state_dict(ck["state"], strict=False)
+        if unexpected or any(not k.startswith("pooled.") for k in missing):
+            raise RuntimeError(f"role gate checkpoint mismatch: missing {missing}, unexpected {unexpected}")
         return m.to(device)
 
 
 def gate_maps(record, size=None):
     """Average recorded cross-attention gates per attribute over all layers -> {gate name: (H,W) tensor} for the
     conditional half of a CFG batch (index -1). `size` resamples every layer's map to one resolution."""
-    acc = {n: [] for n in CROSS_GATES}
+    acc = {n: [] for n in CROSS_GATES + SKETCH_GATES}
     target = size
+    cn = {k: v for k, v in record.items() if k.startswith("controlnet")}
     for name, g in record.items():
         if name.startswith("controlnet"):
             continue
@@ -265,4 +331,10 @@ def gate_maps(record, size=None):
         m = F.interpolate(m[None], size=(target, target), mode="bilinear", align_corners=False)[0]
         for i, gn in enumerate(CROSS_GATES):
             acc[gn].append(m[i])
+    if cn:
+        high = set(sorted({v.shape[-1] for v in cn.values()}, reverse=True)[:2])
+        target = target or max(v.shape[-1] for v in cn.values())
+        for v in cn.values():
+            m = F.interpolate(v[-1:].float(), size=(target, target), mode="bilinear", align_corners=False)[0, 0]
+            acc["sketch_contour" if v.shape[-1] in high else "sketch_placement"].append(m)
     return {k: torch.stack(v).mean(0) for k, v in acc.items() if v}
