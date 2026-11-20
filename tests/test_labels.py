@@ -33,7 +33,7 @@ def test_gates_colour_and_object():
 
 def test_governing_map():
     m = L.governing(row(caption="Pink hammer."))
-    assert m["colour"] == "text" and m["material"] == "reference" and m["geometry"] == "sketch"
+    assert m["colour"] == "reference" and m["material"] == "reference" and m["geometry"] == "sketch"
     assert m["conflicts"] == ["g_col"]
 
 

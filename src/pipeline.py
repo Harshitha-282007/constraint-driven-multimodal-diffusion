@@ -25,6 +25,7 @@ import torch.nn.functional as F
 from PIL import Image, ImageOps
 
 from governance.features import ClipL, build_x, letterbox, object_phrase, on_white, ref_for_clip, sketch_for_clip, to_grey
+from rolegate.tokens import token_groups
 
 BASE_ID = "stabilityai/stable-diffusion-xl-base-1.0"
 VAE_ID = "madebyollin/sdxl-vae-fp16-fix"
@@ -179,8 +180,98 @@ class Pipeline:
                       clip=dict(cap=cap_e, obj=obj_e, sketch=sk_e, ref=ref_e), S_gh=self._soft_sketch(sk, self.GH))
             if s.get("attr"):
                 it["attr"], it["attr_emb"] = s["attr"], self.clip.text([s["attr"]])[0]
+            it["ref_object"] = s.get("ref_object") or "object"
+            it["text_groups"] = token_groups(self.pipe.tokenizer, s["caption"], obj)
             items.append(it)
         return items
+
+    # ------------------------------------------------------------------ role-gated model: reference channels
+    OBJ_TEXT_ID = "laion/CLIP-ViT-H-14-laion2B-s32B-b79K"          # text tower of IP-Adapter's image encoder
+
+    @torch.no_grad()
+    def prepare_object_dirs(self, names):
+        """Unit text directions of 'a photo of a {name}' in IP-Adapter's ViT-H embedding space (InstantStyle's
+        content subtraction). Loaded once, then the text tower is freed."""
+        names = [n for n in dict.fromkeys(names) if n not in getattr(self, "obj_dirs", {})]
+        if not hasattr(self, "obj_dirs"):
+            self.obj_dirs = {}
+        if not names:
+            return self.obj_dirs
+        from transformers import CLIPTextModelWithProjection, CLIPTokenizer
+        tok = CLIPTokenizer.from_pretrained(self.OBJ_TEXT_ID)
+        txt = CLIPTextModelWithProjection.from_pretrained(self.OBJ_TEXT_ID, torch_dtype=self.dt).to(self.dev).eval()
+        for i in range(0, len(names), 64):
+            chunk = names[i:i + 64]
+            t = tok([object_phrase(n) for n in chunk], padding="max_length", max_length=77, truncation=True, return_tensors="pt").to(self.dev)
+            e = F.normalize(txt(**t).text_embeds.float(), dim=-1).cpu()
+            self.obj_dirs.update(zip(chunk, e))
+        del txt; gc.collect(); torch.cuda.empty_cache()
+        return self.obj_dirs
+
+    def ref_channels(self, it):
+        """(1, 2, 1024): [colour channel, texture channel] of the reference.
+
+        colour  = E(flat grey) + E(ref) - E(grey ref)          colour on a neutral base (SADis)
+        texture = E(grey ref) minus its component along the reference object's text direction (InstantStyle)
+        """
+        full, grey, flat = it["ip_full"].float().view(-1), it["ip_grey"].float().view(-1), self.flat_ip.float().view(-1)
+        d = getattr(self, "obj_dirs", {}).get(it.get("ref_object", ""))
+        col = flat + (full - grey)
+        tex = grey - (grey @ d) * d if d is not None else grey
+        return torch.stack([col, tex])[None]
+
+    @torch.no_grad()
+    def run_role(self, it, role, flags, p=None, knock=(), freeze_text=False, record_at=None, seed_off=0):
+        """Generate with the role gates installed. flags = (object, colour, material) conflict scores in [0,1].
+
+        The base schedule is the existing 'scheduled' arm (centre strengths, geometry first, appearance later);
+        the gates then decide per layer, per pixel and per attribute how much of each input acts.
+        Returns (image, gate record or None).
+        """
+        p = dict(CENTER, **(p or {}))
+        pipe, dev, dt, res = self.pipe, self.dev, self.dt, self.res
+        pe, npe, ppe, nppe = [t.to(dev) for t in it["txt"]]
+        pr, pooled = torch.cat([npe, pe]), torch.cat([nppe, ppe])
+        tids = torch.tensor([[res, res, 0, 0, res, res]], device=dev, dtype=dt).repeat(2, 1)
+        emb = self.ref_channels(it)
+        ipe = [torch.cat([torch.zeros_like(emb), emb]).to(dev, dt)]
+        groups = torch.tensor([[0] * 77, list(it["text_groups"])], device=dev, dtype=torch.long)
+        fl = torch.tensor([list(flags)] * 2, device=dev, dtype=torch.float32)
+        ctrl = pipe.prepare_image(image=it["sketch"], width=res, height=res, batch_size=1, num_images_per_prompt=1,
+                                  device=dev, dtype=dt, do_classifier_free_guidance=True, guess_mode=False)
+        pipe.scheduler.set_timesteps(self.steps, device=dev)
+        ts = pipe.scheduler.timesteps
+        gen = torch.Generator("cpu").manual_seed(it["seed"] + seed_off)
+        lat = torch.randn((1, 4, res // 8, res // 8), generator=gen).to(dev, dt) * pipe.scheduler.init_noise_sigma
+        added = {"text_embeds": pooled, "time_ids": tids}
+        record = None
+        role.to(dev).eval()
+        role.install(self.unet)
+        try:
+            for i, t in enumerate(ts):
+                f = i / len(ts)
+                cs, ips = p["cs"] * cs_shape(f, p["hold"]), p["ip"] * ip_shape(f)
+                role.set_context(fl, t.view(1).repeat(2).to(dev), groups, ips, knock, freeze_text)
+                role.ctx.record = {} if record_at is not None and i == record_at else None
+                li = pipe.scheduler.scale_model_input(torch.cat([lat] * 2), t)
+                down, mid = pipe.controlnet(li, t, encoder_hidden_states=pr, controlnet_cond=ctrl, conditioning_scale=float(cs),
+                                            guess_mode=False, added_cond_kwargs=added, return_dict=False)
+                down, mid = role.gate_controlnet(down, mid)
+                eps = self.unet(li, t, encoder_hidden_states=pr, added_cond_kwargs={**added, "image_embeds": ipe},
+                                down_block_additional_residuals=down, mid_block_additional_residual=mid, return_dict=False)[0]
+                if role.ctx.record is not None:
+                    record = role.ctx.record
+                eu, ec = eps.chunk(2)
+                eps = eu + p["cfg"] * (ec - eu)
+                lat = pipe.scheduler.step(eps, t, lat, return_dict=False)[0]
+        finally:
+            role.remove(self.unet)
+            role.ctx.record = None
+        img = self.vae.decode(lat / self.vae.config.scaling_factor, return_dict=False)[0]
+        return pipe.image_processor.postprocess(img, output_type="pil")[0], record
+
+    def controlnet_res_channels(self):
+        return [m.out_channels for m in self.controlnet.controlnet_down_blocks] + [self.controlnet.controlnet_mid_block.out_channels]
 
     # ------------------------------------------------------------------ old constraint guidance (baseline arm only)
     def _guidance_delta(self, x0, it, lam_geo, lam_app):

@@ -29,7 +29,10 @@ def thin_mask(sketch_white_on_black, size=EV):
 
 
 class EvalKit:
-    def __init__(self, device=None, use_lpips=True, use_clipseg=True):
+    def __init__(self, device=None, use_lpips=True, use_clipseg=True, rule="reference"):
+        """rule: "reference" (reference governs colour + material; current rule) or "text_if_stated" (earlier runs)."""
+        assert rule in ("reference", "text_if_stated")
+        self.rule = rule
         from transformers import (AutoModel, CLIPSegForImageSegmentation, CLIPSegProcessor, CLIPTextModelWithProjection,
                                   CLIPTokenizer, CLIPVisionModelWithProjection)
         self.dev = device or ("cuda" if torch.cuda.is_available() else "cpu")
@@ -127,23 +130,37 @@ class EvalKit:
         out["dino_ref"] = float((self.dino_img(img) * self.dino_img(ref)).sum())
         if all(k_ in row for k_ in ("ref_finish", "ref_material", "ref_colors")):
             out["attr_B"] = float((ci * self.t1(f"a {row['ref_finish']} {row['ref_material']} object in {row['ref_colors']} colors")).sum())
-        # --- colour adherence: the governing source is the text if it states a colour, otherwise the reference
+        # --- object region: CLIPSeg mask of the caption's object when available (background excluded), else the
+        #     filled sketch region
         region = M.object_region(thin)
-        gen_px = M.foreground_pixels(np.array(img256), region)
+        gm = self.seg_mask(img, cap_cat) if self.seg is not None else None
+        obj_region = gm if self.rule == "reference" and gm is not None and gm.mean() > 0.01 else region
+        # --- colour adherence. rule="reference" (current): the reference always governs colour and material, and a
+        #     colour the caption names counts as leak. rule="text_if_stated" reproduces the earlier evaluations.
+        gen_px = M.foreground_pixels(np.array(img256), obj_region)
         cc, rc = caption_colors(row["caption"]), ref_colors(row)
         if not rc:
             rc = M.dominant(M.foreground_pixels(np.array(ref.convert("RGB").resize((EV, EV)))))
-        out.update(M.colour_adherence(gen_px, cc if cc else rc, rc if cc else ()))
-        out["col_governed_by"] = "text" if cc else "reference"
+        if self.rule == "reference":
+            out.update(M.colour_adherence(gen_px, rc, cc))
+            out["col_governed_by"] = "reference"
+        else:
+            out.update(M.colour_adherence(gen_px, cc if cc else rc, rc if cc else ()))
+            out["col_governed_by"] = "text" if cc else "reference"
         # --- material adherence (CLIP-B zero-shot over 8 materials; weak, report as secondary)
         pred = self.mat_names[int((ci @ self.mat_emb.T).argmax())]
         cm = caption_materials(row["caption"])
-        want = cm if cm else [s for s in self.mat_names if ref_has_material(row, s)]
+        ref_m = [s for s in self.mat_names if ref_has_material(row, s)]
+        want = ref_m if self.rule == "reference" else (cm if cm else ref_m)
         out["mat_hit"] = float(pred in want) if want else float("nan")
-        out["mat_governed_by"] = "text" if cm else "reference"
+        out["mat_governed_by"] = "reference" if self.rule == "reference" or not cm else "text"
+        # --- identity leak: does the image read as the reference's own object rather than the caption's?
+        if row.get("ref_object"):
+            ref_sim = float((ci * self.t1(f"a photo of a {str(row['ref_object']).replace('_', ' ')}")).sum())
+            out["id_leak_margin"] = ref_sim - out["sem_text"]
+            out["id_leak"] = float(out["id_leak_margin"] > 0)
         # --- layout consistency
-        if self.seg is not None:
-            gm = self.seg_mask(img, cap_cat)
+        if gm is not None:
             out["layout_sketch_iou"] = self.iou(gm, region)
             if target is not None:
                 out["layout_tgt_iou"] = self.iou(gm, self.seg_mask(target, sk_cat))

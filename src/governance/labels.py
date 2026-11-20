@@ -1,15 +1,16 @@
 """
 Gate labels and conflict-row generation. Pure Python (no torch), so it is unit-tested locally.
 
-Agreed rules (single object):
+Agreed rules (single object; revised 2026-11-20: the reference wins colour and material):
   geometry + layout  <- sketch, always
   object identity    <- text            -> g_obj = 1 when the caption's object differs from the sketch's object
-  colour             <- text if the caption states one, otherwise the reference
+  colour             <- reference, also when the caption names another colour
                                         -> g_col = 1 when the caption states a colour the reference does not have
-  material           <- text if the caption states one, otherwise the reference
+  material           <- reference, also when the caption names another material
                                         -> g_mat = 1 when the caption states a material the reference does not have
 
-A gate of 1 means "the reference (or the sketch, for g_obj) must NOT supply this attribute".
+A gate of 1 flags a conflict on that attribute; who wins is fixed by the rules above.
+(The earlier governed pipeline, `pipeline.compose_ip`, was built for the old rule where a stated text colour won.)
 The row makers are ported from notebooks/data_prep/01b_add_conflicts.ipynb.
 """
 import hashlib
@@ -85,8 +86,8 @@ def governing(row):
     return {
         "geometry": "sketch", "layout": "sketch",
         "object": "text",
-        "colour": "text" if caption_colors(row["caption"]) else "reference",
-        "material": "text" if caption_materials(row["caption"]) else "reference",
+        "colour": "reference",
+        "material": "reference",
         "conflicts": [k for k, v in g.items() if v],
     }
 
