@@ -116,6 +116,23 @@ def forward(P, role, ca, batch, sched, t, neutral):
 
 
 # ----------------------------------------------------------------------------- training
+FALLBACK_DIR = "/content/colour_adapter_fallback"
+
+
+def safe_save(ca, out_dir, name, meta, hist, log=print):
+    """Checkpoint + log. A mounted Drive folder can vanish mid-run (it did once: 'Parent directory ... does not exist' at step 100
+    killed the run), so re-create it before writing and fall back to local disk instead of losing the run."""
+    for d in (out_dir, FALLBACK_DIR):
+        try:
+            os.makedirs(d, exist_ok=True)
+            ca.save(os.path.join(d, name), meta)
+            json.dump(hist, open(os.path.join(d, "train_log.json"), "w"))
+            return d
+        except Exception as e:                                    # noqa: BLE001
+            log(f"WARNING: could not save {name} to {d}: {e}")
+    return None
+
+
 def train(data_dir, gov_path, out_dir, res=512, lr=5e-4, lr_alpha=1e-2, accum=4, steps=300, save_every=100, seed=0,
           resume=None, memory_test=False, P=None, log=print):
     from diffusers import DDPMScheduler
@@ -185,8 +202,7 @@ def train(data_dir, gov_path, out_dir, res=512, lr=5e-4, lr_alpha=1e-2, accum=4,
                 log(f"step {step:4d}/{total} loss {mean('loss'):.4f} diff {mean('diff'):.4f} colour {mean('colour'):.4f} | mean |alpha| {am:.4f} | "
                     f"peak GPU {torch.cuda.max_memory_allocated() / 1e9:.2f} GB | {(time.time() - t0) / 60:.1f} min")
             if not memory_test and step % save_every == 0:
-                ca.save(os.path.join(out_dir, f"colour_adapter_step{step:04d}.pt"), dict(step=step))
-                json.dump(hist, open(os.path.join(out_dir, "train_log.json"), "w"))
+                safe_save(ca, out_dir, f"colour_adapter_step{step:04d}.pt", dict(step=step), hist, log)
     finally:
         ca.remove(P.unet); role.remove(P.unet)
         P.unet.disable_gradient_checkpointing(); P.unet.eval(); P.vae.disable_gradient_checkpointing()
@@ -196,10 +212,10 @@ def train(data_dir, gov_path, out_dir, res=512, lr=5e-4, lr_alpha=1e-2, accum=4,
     else:
         cfg = dict(version=VERSION, res=res, lr=lr, lr_alpha=lr_alpha, accum=accum, steps=step, w_colour=W_COLOUR, n_samples=len(data),
                    kinds=by_kind, minutes=(time.time() - t0) / 60)
-        ca.save(os.path.join(out_dir, "colour_adapter.pt"), dict(step=step, train_cfg=cfg))
-        json.dump(cfg, open(os.path.join(out_dir, "colour_adapter_config.json"), "w"), indent=1)
-        json.dump(hist, open(os.path.join(out_dir, "train_log.json"), "w"))
-        log(f"saved {out_dir}/colour_adapter.pt")
+        where = safe_save(ca, out_dir, "colour_adapter.pt", dict(step=step, train_cfg=cfg), hist, log)
+        if where:
+            json.dump(cfg, open(os.path.join(where, "colour_adapter_config.json"), "w"), indent=1)
+        log(f"saved {where}/colour_adapter.pt")
     gc.collect(); torch.cuda.empty_cache()
     return P, ca, hist
 
