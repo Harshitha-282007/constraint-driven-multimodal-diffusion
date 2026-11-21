@@ -224,7 +224,6 @@ class Pipeline:
         tex = grey - (grey @ d) * d if d is not None else grey
         return torch.stack([col, tex])[None]
 
-    @torch.no_grad()
     @staticmethod
     def controlnet_text(pr, tn, flags):
         """Caption embeddings for the ControlNet. 'pr' is the CFG-batched full caption, 'tn' the batched
@@ -239,7 +238,7 @@ class Pipeline:
 
     @torch.no_grad()
     def run_role(self, it, role, flags, p=None, knock=(), freeze_text=False, record_at=None, seed_off=0, cn_text="full",
-                 adapter=None, palette=None, adapter_scale=1.0):
+                 adapter=None, palette=None, adapter_scale=1.0, adapter_both=False):
         """Generate with the role gates installed. flags = (object, colour, material) conflict scores in [0,1].
 
         The base schedule is the existing 'scheduled' arm (centre strengths, geometry first, appearance later);
@@ -273,7 +272,9 @@ class Pipeline:
         if adapter is not None:                      # colour adapter wraps the role-gate processors; unconditional half gets no palette
             pal = torch.as_tensor(palette, dtype=torch.float32).view(1, -1, 4).to(dev)
             adapter.to(dev).eval(); adapter.install(self.unet)
-            adapter.set_palette(torch.cat([torch.zeros_like(pal), pal]), scale=adapter_scale)
+            # adapter_both: palette on the unconditional half too. The adapter is trained in a single pass WITH its palette, so with
+            # classifier-free guidance (cfg 7) a palette on the conditional half only has its effect multiplied by ~cfg (saturated output).
+            adapter.set_palette(torch.cat([pal if adapter_both else torch.zeros_like(pal), pal]), scale=adapter_scale)
         try:
             for i, t in enumerate(ts):
                 f = i / len(ts)
