@@ -225,7 +225,21 @@ class Pipeline:
         return torch.stack([col, tex])[None]
 
     @torch.no_grad()
-    def run_role(self, it, role, flags, p=None, knock=(), freeze_text=False, record_at=None, seed_off=0):
+    @staticmethod
+    def controlnet_text(pr, tn, flags):
+        """Caption embeddings for the ControlNet. 'pr' is the CFG-batched full caption, 'tn' the batched
+        colour/material-neutral versions (None when the caption has no such words). Each attribute is removed
+        in proportion to its conflict flag, so a flagged colour word never reaches the ControlNet residuals."""
+        out = pr
+        for w, k in (("colour", 1), ("material", 2)):
+            n = tn.get(w)
+            if n is not None:
+                out = out - float(flags[k]) * (pr - n.to(pr.dtype))
+        return out
+
+    @torch.no_grad()
+    def run_role(self, it, role, flags, p=None, knock=(), freeze_text=False, record_at=None, seed_off=0, cn_text="full",
+                 adapter=None, palette=None, adapter_scale=1.0):
         """Generate with the role gates installed. flags = (object, colour, material) conflict scores in [0,1].
 
         The base schedule is the existing 'scheduled' arm (centre strengths, geometry first, appearance later);
@@ -245,6 +259,7 @@ class Pipeline:
         for w, v in (it.get("txt_neutral") or {}).items():               # unconditional half: negative prompt itself
             tn[w] = None if v is None else torch.cat([npe, v[0].to(dev)])
             pn[w] = None if v is None else torch.cat([nppe, v[1].to(dev)])
+        cn_pr = self.controlnet_text(pr, tn, flags) if cn_text == "mix" else pr   # leak fix: see HANDOFF section 4
         ctrl = pipe.prepare_image(image=it["sketch"], width=res, height=res, batch_size=1, num_images_per_prompt=1,
                                   device=dev, dtype=dt, do_classifier_free_guidance=True, guess_mode=False)
         pipe.scheduler.set_timesteps(self.steps, device=dev)
@@ -255,6 +270,10 @@ class Pipeline:
         record = None
         role.to(dev).eval()
         role.install(self.unet)
+        if adapter is not None:                      # colour adapter wraps the role-gate processors; unconditional half gets no palette
+            pal = torch.as_tensor(palette, dtype=torch.float32).view(1, -1, 4).to(dev)
+            adapter.to(dev).eval(); adapter.install(self.unet)
+            adapter.set_palette(torch.cat([torch.zeros_like(pal), pal]), scale=adapter_scale)
         try:
             for i, t in enumerate(ts):
                 f = i / len(ts)
@@ -263,7 +282,7 @@ class Pipeline:
                 role.ctx.record = {} if record_at is not None and i == record_at else None
                 added = {"text_embeds": role.mix_pooled(pooled, pn.get("colour"), pn.get("material")), "time_ids": tids}
                 li = pipe.scheduler.scale_model_input(torch.cat([lat] * 2), t)
-                down, mid = pipe.controlnet(li, t, encoder_hidden_states=pr, controlnet_cond=ctrl, conditioning_scale=float(cs),
+                down, mid = pipe.controlnet(li, t, encoder_hidden_states=cn_pr, controlnet_cond=ctrl, conditioning_scale=float(cs),
                                             guess_mode=False, added_cond_kwargs=added, return_dict=False)
                 down, mid = role.gate_controlnet(down, mid)
                 eps = self.unet(li, t, encoder_hidden_states=pr, added_cond_kwargs={**added, "image_embeds": ipe},
@@ -274,6 +293,8 @@ class Pipeline:
                 eps = eu + p["cfg"] * (ec - eu)
                 lat = pipe.scheduler.step(eps, t, lat, return_dict=False)[0]
         finally:
+            if adapter is not None:
+                adapter.clear(); adapter.remove(self.unet)
             role.remove(self.unet)
             role.ctx.record = None
         img = self.vae.decode(lat / self.vae.config.scaling_factor, return_dict=False)[0]
