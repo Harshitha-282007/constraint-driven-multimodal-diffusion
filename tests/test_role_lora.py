@@ -85,6 +85,22 @@ def test_zero_init_is_identity_then_trained_changes_output_and_scale_zero_restor
     assert torch.allclose(u.attns[0](t, r)[0], changed[0])                               # context restored
 
 
+def test_cond_only_leaves_unconditional_half_at_baseline():
+    u = _UNet()
+    t, r = torch.randn(2, 5, 20), torch.randn(2, 4, 12)        # row 0 = unconditional, row 1 = conditional
+    base = u.attns[0](t, r)
+    lora = RoleLoRA.attach(u, rank=4)
+    with torch.no_grad():
+        for p in lora.params:
+            p.B.normal_()
+    lora.set_scale(1.0, cond_only=True)
+    out = u.attns[0](t, r)
+    for o, b in zip(out, base):
+        assert torch.allclose(o[0], b[0]) and not torch.allclose(o[1], b[1])
+    lora.set_scale(1.0)                                         # default: both halves
+    assert not torch.allclose(u.attns[0](t, r)[0][0], base[0][0])
+
+
 def test_detach_restores_original_modules_and_gradients_reach_A_and_B():
     u = _UNet()
     orig = (u.attns[0].to_k, u.attns[0].processor.to_k_ip[0])

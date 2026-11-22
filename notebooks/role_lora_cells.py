@@ -60,6 +60,18 @@ ARMS = {"fixed": a_fixed, "rule": a_rule, "lora": a_lora}
 EVAL_DIR = "/content/role_eval"; os.makedirs(EVAL_DIR, exist_ok=True)
 ER.generate(rows, items, ARMS, EVAL_DIR)
 
+# %% 3b. DIAGNOSTIC for the first checkpoint (trained WITHOUT unconditional-half rows): does applying the LoRA to the conditional half only
+# remove the hatched / saturated artefacts? Same rows, LoRA off vs both halves vs cond-only, one picture. Needs `lora` from cell 2 (or load role_lora.pt).
+def a_lora_c(it, r): lora.set_scale(1, cond_only=True); return P.run_role(it, gates, [0, 0, 0])[0]
+probe = [r for r in rows if ER.kind_of(r) in ("col", "mat")][:3]
+fig, ax = plt.subplots(len(probe), 4, figsize=(11, 2.8 * len(probe)), squeeze=False)
+for i, r in enumerate(probe):
+    it = items[r["id"]]
+    for j, (nm, fn) in enumerate([("reference", None), ("LoRA off", a_fixed), ("LoRA both halves", a_lora), ("LoRA cond-only", a_lora_c)]):
+        ax[i, j].imshow(op(r, "reference") if fn is None else fn(it, r)); ax[i, j].set_title(nm, fontsize=7); ax[i, j].axis("off")
+plt.tight_layout(); plt.savefig(f"{EVAL_DIR}/cond_only_check.png", dpi=110); plt.show()
+lora.set_scale(1)
+
 # %% 4. score + tables
 kit = EvalKit(rule="reference")
 scores = ER.score(kit, rows, ARMS, EVAL_DIR, DATA_DIR)

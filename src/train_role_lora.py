@@ -60,9 +60,10 @@ def build_specs(rows, data_dir, res, seed=0, extra_hue=1):
 
 
 # ----------------------------------------------------------------------------- one forward
-def forward(P, role, batch, sched, t, noise=None):
+def forward(P, role, batch, sched, t, noise=None, drop=False):
     """Plain forward of the baseline architecture (no neutralisation, flags 0). Returns (pred eps, noise, noisy).
-    Pass the returned `noise` back in to compare two passes (LoRA on / off) on the identical noisy input."""
+    Pass the returned `noise` back in to compare two passes (LoRA on / off) on the identical noisy input.
+    drop=True is the UNCONDITIONAL half of classifier-free guidance as inference builds it: negative prompt, no reference."""
     dev, dt, res = P.dev, P.dt, P.res
     B = len(batch)
     lat = torch.cat([d["lat"] for d in batch]).to(dev, dt)
@@ -70,9 +71,14 @@ def forward(P, role, batch, sched, t, noise=None):
     tt = t.repeat(B)
     noisy = sched.add_noise(lat, noise, tt)
     f = 1 - t.item() / sched.config.num_train_timesteps
-    pe = torch.cat([d["txt"][0] for d in batch]).to(dev); pooled = torch.cat([d["txt"][2] for d in batch]).to(dev)
-    groups = torch.stack([d["groups"] for d in batch]).to(dev)
     emb = torch.cat([d["emb"] for d in batch]).to(dev, dt)
+    if drop:
+        pe = torch.cat([d["txt"][1] for d in batch]).to(dev); pooled = torch.cat([d["txt"][3] for d in batch]).to(dev)
+        groups = torch.zeros(B, 77, dtype=torch.long, device=dev)
+        emb = torch.zeros_like(emb)
+    else:
+        pe = torch.cat([d["txt"][0] for d in batch]).to(dev); pooled = torch.cat([d["txt"][2] for d in batch]).to(dev)
+        groups = torch.stack([d["groups"] for d in batch]).to(dev)
     tids = torch.tensor([[res, res, 0, 0, res, res]], device=dev, dtype=dt).repeat(B, 1)
     cs, ips = CENTER["cs"] * cs_shape(f, CENTER["hold"]), CENTER["ip"] * ip_shape(f)
     role.set_context(torch.zeros(B, 3, device=dev), tt, groups, ips)
@@ -133,13 +139,22 @@ def train(data_dir, gov_path, out_dir, res=512, lr=3e-4, accum=4, steps=400, sav
         while step < total:
             for _ in range(accum):
                 micro += 1
-                do_attr = micro % 2 == 0 or memory_test
-                do_keep = micro % 3 == 0 or memory_test
+                do_drop = micro % 5 == 0 and not memory_test
+                do_attr = (micro % 2 == 0 or memory_test) and not do_drop
+                do_keep = micro % 3 == 0 or memory_test or do_drop
                 d = random.choice(normal) if do_keep else random.choice(data)
                 t = torch.randint(200, 601, (1,), device=dev) if do_attr else torch.randint(0, T, (1,), device=dev)
-                pred, noise, noisy = forward(P, role, [d], sched, t)
-                parts = dict(diff=LS.masked_diffusion(pred, noise, d["mask_lat"].to(dev)))
-                if do_keep:
+                pred, noise, noisy = forward(P, role, [d], sched, t, drop=do_drop)
+                if do_drop:
+                    # unconditional CFG half: inference runs the LoRA here too (negative prompt, no reference) and multiplies
+                    # (cond - uncond) by cfg 7. Untrained, that half drifts and the drift is amplified x7 (hatched, saturated images).
+                    # Pin it to the baseline: no diffusion target, keep loss only (full weight).
+                    with torch.no_grad(), lora.disabled():
+                        pred0, _, _ = forward(P, role, [d], sched, t, noise=noise, drop=True)
+                    parts = dict(keep=((pred.float() - pred0.float()) ** 2).mean())
+                else:
+                    parts = dict(diff=LS.masked_diffusion(pred, noise, d["mask_lat"].to(dev)))
+                if do_keep and not do_drop:
                     with torch.no_grad(), lora.disabled():
                         pred0, _, _ = forward(P, role, [d], sched, t, noise=noise)
                     parts["keep"] = W["keep"] * ((pred.float() - pred0.float()) ** 2).mean()

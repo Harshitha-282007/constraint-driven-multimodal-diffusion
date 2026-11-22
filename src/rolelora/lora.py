@@ -30,6 +30,7 @@ GROUPS = ("text", "ref")
 class _Ctrl:
     def __init__(self):
         self.scale = 1.0
+        self.cond_only = False
 
 
 class LoRAParams(nn.Module):
@@ -61,6 +62,9 @@ class LoRALinear(nn.Module):
         if s == 0.0:
             return y
         d = F.linear(F.linear(x.to(self.lora.A.dtype), self.lora.A), self.lora.B) * (self.mult * s)
+        if self.ctrl.cond_only and x.shape[0] % 2 == 0:
+            # classifier-free batch is [unconditional, conditional]: leave the unconditional half exactly at the baseline
+            d = torch.cat([torch.zeros_like(d[: d.shape[0] // 2]), d[d.shape[0] // 2:]])
         return y + d.to(y.dtype)
 
 
@@ -111,8 +115,11 @@ class RoleLoRA(nn.Module):
         self._undo = []
 
     # ------------------------------------------------------------------ switch
-    def set_scale(self, s):
+    def set_scale(self, s, cond_only=False):
+        """cond_only=True (inference with classifier-free guidance): the LoRA acts on the conditional half only, so the
+        unconditional half stays the baseline and (cond - uncond) x cfg carries just the LoRA's intended change."""
         self.ctrl.scale = float(s)
+        self.ctrl.cond_only = bool(cond_only)
 
     @contextmanager
     def disabled(self):
