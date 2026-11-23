@@ -236,6 +236,20 @@ class Pipeline:
                 out = out - float(flags[k]) * (pr - n.to(pr.dtype))
         return out
 
+    @staticmethod
+    def mix_text(pr, pooled, tn, pn, flags):
+        """Flag-gated text conditioning (no gates, no training): each attribute's neutral caption is blended in with
+        weight = its conflict flag, on all three text paths (UNet text, ControlNet text, pooled embedding).
+
+        pr/pooled: CFG-batched full-caption embeddings; tn/pn: {"colour"|"material": batched neutral embeds or None};
+        flags = (f_col, f_mat). flag 0 returns the inputs unchanged, flag 1 the neutral caption.
+        """
+        for w, f in (("colour", float(flags[0])), ("material", float(flags[1]))):
+            if tn.get(w) is not None and f:
+                pr = pr - f * (pr - tn[w].to(pr.dtype))
+                pooled = pooled - f * (pooled - pn[w].to(pooled.dtype))
+        return pr, pooled
+
     @torch.no_grad()
     def run_role(self, it, role, flags, p=None, knock=(), freeze_text=False, record_at=None, seed_off=0, cn_text="full",
                  adapter=None, palette=None, adapter_scale=1.0, adapter_both=False):
@@ -323,17 +337,24 @@ class Pipeline:
 
     # ------------------------------------------------------------------ generation
     @torch.no_grad()
-    def run(self, it, p=None, shaped=True, gates=None, split=True, style_only=None, guided=False, seed_off=0):
+    def run(self, it, p=None, shaped=True, gates=None, split=True, style_only=None, guided=False, seed_off=0, text_flags=None):
         """Generate one image.
 
         gates=None  legacy behaviour: shaped=False is the 'fixed' arm, shaped=True the 'scheduled' / 'router' arms.
         gates=dict  governed behaviour (see module docstring). split=False keeps the full reference embedding
                     (ablation); style_only defaults to True when gates are given.
+        text_flags=(f_col, f_mat)  flag-gated text conditioning (`mix_text`); None leaves the caption untouched, so every
+                    existing arm is reproduced exactly.
         """
         p = dict(CENTER, **(p or {}))
         pipe, dev, dt, res = self.pipe, self.dev, self.dt, self.res
         pe, npe, ppe, nppe = [t.to(dev) for t in it["txt"]]
         pr, pooled = torch.cat([npe, pe]), torch.cat([nppe, ppe])
+        if text_flags is not None:
+            nz = it.get("txt_neutral") or {}
+            tn = {w: None if v is None else torch.cat([npe, v[0].to(dev)]) for w, v in nz.items()}
+            pn = {w: None if v is None else torch.cat([nppe, v[1].to(dev)]) for w, v in nz.items()}
+            pr, pooled = self.mix_text(pr, pooled, tn, pn, text_flags)
         tids = torch.tensor([[res, res, 0, 0, res, res]], device=dev, dtype=dt).repeat(2, 1)
         governed = gates is not None
         style_only = governed if style_only is None else style_only

@@ -1,0 +1,78 @@
+﻿<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>One Sheep Army - IE643 Novelty Assessment Report</title>
+<style>
+@page{size:A4;margin:11mm 12mm}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:"Palatino Linotype","Book Antiqua",Palatino,serif;font-size:9.2pt;line-height:1.22;color:#000}
+h1{font-size:15pt;color:#000080;text-align:center}
+.sub{text-align:center;font-size:9.5pt;margin:2px 0 5px}
+h2{font-size:10.6pt;color:#000080;border-bottom:1.2px solid #000080;margin:7px 0 3px}
+p{margin:0 0 3px;text-align:justify}
+ul{padding-left:15px;margin:0 0 3px} li{margin-bottom:1px;text-align:justify}
+table{border-collapse:collapse;width:100%;font-size:8.1pt;margin:2px 0 3px}
+th,td{border:0.8px solid #000;padding:1.5px 4px;vertical-align:top;text-align:left}
+th{background:#e6e9f7}
+td.n,th.n{text-align:center}
+.cap{font-size:8pt;color:#00f;text-align:center;margin-bottom:3px}
+.cap b{color:#000}
+img{display:block;margin:2px auto}
+code{font-size:7.8pt} tr{break-inside:avoid}
+</style></head><body>
+
+<h1>IE 643 Novelty Assessment Report</h1>
+<div class="sub"><b>Constraint-Driven Multimodal Diffusion using Text, Sketch and Reference Image</b><br>Team <b>One Sheep Army</b> &middot; R. Harshitha (24B0053)</div>
+
+<h2>1. Starting point: the intensive-assessment submission</h2>
+<p>For the intensive assessment we proposed <b>attribute routing</b>: sketch &rarr; geometry, text &rarr; semantics, reference &rarr; appearance. The planned FLUX.1-dev + UniCombine backbone ran out of memory on the free T4, so we submitted a <b>frozen SDXL + scribble ControlNet + IP-Adapter</b> pipeline on a 200-photo Sketchy pilot (160/20/20 split by photo; captions by Qwen3-VL-2B; neutral-object reference images v2; 800 labelled conflict rows: object, colour, material, swapped reference). Its "routing" was a small MLP (six CLIP cosines &rarr; four global scalars: sketch strength, sketch hold time, reference strength, text guidance) trained on 28 items &times; 9 generated variants, compared against fixed and hand-scheduled weights, with optional constraint guidance. Findings of that submission:</p>
+<ul>
+<li>Fixed weights gave the best edge precision; the router's caption-alignment gain over the schedule was <b>not significant</b>; constraint guidance improved colour match by 0.042 but cut edge precision by 0.085.</li>
+<li>The conflict features could not separate conflict types (colour 0.610, material 0.541, swapped reference 0.597 vs normal 0.604), so the router's outputs barely varied and it behaved like the hand schedule. The reference also copied its own object (DINO to reference 0.673 vs 0.105 to the target).</li>
+<li>Two parameter values on the slides were wrong: the code used guidance weight 0.25 and relax 0.3, not 0.03 and 0.7.</li>
+</ul>
+<p><b>Novelty goal.</b> The course brief requires a <i>trained</i> model, one object per image, and that the model <i>automatically</i> decide which input controls what, on a free T4. We therefore asked: <b>can a trained layer make SDXL enforce per-attribute responsibilities</b> (text = identity, sketch = shape, reference = colour and material; where inputs conflict the reference wins colour), rather than only rescaling global strengths?</p>
+
+<h2>2. Approaches tried for novelty assessment</h2>
+<table>
+<tr><th class="n">#</th><th>Approach (code)</th><th>What we did</th><th>Result</th><th>Outcome</th></tr>
+<tr><td class="n">1</td><td><b>Governance network</b><br>(<code>src/governance</code>, nb 05)</td><td>Frozen CLIP features of 6 slots (caption, object phrase, sketch, reference, grey reference, colour part) &rarr; 3 conflict flags (object, colour, material); weighted BCE on rule labels made from metadata, no images generated; Platt-calibrated.</td><td>Detection works: colour 0.755 (old detector 0.540), material 0.940 (0.643). But images barely changed: colour hit 0.40 = schedule; flipping the colour gate moved pixels only 7.8/255.</td><td>Kept (flags)</td></tr>
+<tr><td class="n">2</td><td><b>Fusion LoRA</b> on the UNet<br>(nb 06, 07)</td><td>LoRA trained on (target, sketch, reference, caption) with role dropout (reference greyscaled or caption colour words removed).</td><td>Object conflicts resolved 8/8 (vs 2/8), more realistic; but edge IoU fell 0.369 &rarr; 0.230: it learned to ignore the sketch.</td><td>Dropped</td></tr>
+<tr><td class="n">3</td><td><b>Role gates inside SDXL</b> v1&ndash;v3<br>(<code>src/rolegate</code>, nb 08, 09)</td><td>Learned gates on cross-attention (text identity / colour / material, reference colour / texture) and on ControlNet residuals (contour, placement); neutral-caption channels; flag-initialised, stronger reference colour (v3).</td><td>v1 sketch gates saturated (sketch ignored). v2 sketch fixed, colour still followed the text. v3: no gate moved more than 0.06 from its start; colour loss flat; run stopped at step 450/600.</td><td>Dropped</td></tr>
+<tr><td class="n">4</td><td><b>Leak diagnosis</b><br>(<code>src/pipeline.py</code>)</td><td>Traced why the caption colour survived closed text gates.</td><td>ControlNet received the <b>full caption</b>, so &ldquo;purple&rdquo; reached the UNet through its residuals.</td><td>Key finding</td></tr>
+<tr><td class="n">5</td><td><b>Neutral caption + IP scale 1.0</b> (rule outside the model)</td><td>Colour words &rarr; &ldquo;colored&rdquo;, material &rarr; &ldquo;solid&rdquo; on UNet text, ControlNet text and pooled embedding; IP-Adapter 0.5 &rarr; 1.0. 12 test photos.</td><td>Object 0.10 &rarr; 0.30; edge IoU 0.213 &rarr; 0.376; colour 0.70 and material 0.67 unchanged; swapped reference 0.70 &rarr; 0.00.</td><td>Earlier candidate</td></tr>
+<tr><td class="n">6</td><td><b>Colour adapter + role LoRA</b><br>(<code>src/coloradapter</code>, <code>src/rolelora</code>)</td><td>Palette adapter into the UNet; role-specific LoRA with the unconditional CFG half trained.</td><td>Palette ignored; role LoRA edge IoU 0.753 but DINO to target 0.359 &rarr; 0.057, colour/material compliance 0.30/0.00.</td><td>Dropped</td></tr>
+<tr><td class="n">7</td><td><b>M1 distillation</b> of text colour/material routing (<code>src/m1</code>)</td><td>Scalar gates distilled from the neutral-caption rule; unit-tested.</td><td>No results reported.</td><td>Not evaluated</td></tr>
+<tr><td class="n">8</td><td><b>Attribute Routing Layer (ARL)</b> = router + flag-gated text (nb 11)</td><td>Governance flags <i>f</i> blend the neutral caption into the text path: <i>p&prime; = p &minus; f&middot;(p &minus; p<sub>neutral</sub>)</i> (UNet, ControlNet, pooled); router sets ControlNet scale, hold time, IP scale, CFG; sketch held then relaxed (&times;0.3); reference in the style block only. No diffusion weights trained.</td><td>See Section 3.</td><td><b>Submitted</b></td></tr>
+</table>
+<p><b>How the two LoRA attempts failed.</b></p>
+<ul>
+<li><b>Fusion LoRA (attempt 2).</b> A LoRA on the attention layers of the <i>whole</i> UNet, trained on 160 (target, sketch, reference, caption) quadruples with role dropout (full inputs 40%; greyscale reference 25%; caption colour words removed 25%; no conditions 10%), the real photo being the target. It did what the targets rewarded, resolving object conflicts 8/8 (baseline 2/8) with more realistic images, but because it had to reproduce the whole photo it learned the scene, and since it sits in the layers where the ControlNet residuals enter, it learned to <b>ignore the sketch</b>: edge IoU fell 0.369 &rarr; 0.230. The identity gain was bought with the shape role.</li>
+<li><b>Role LoRA (attempt 6).</b> To avoid that, we restricted the LoRA to where SDXL reads its inputs (text <code>attn2</code> key/value, about 4.8 M parameters; IP-Adapter key/value, about 3.4 M; late blocks; rank 16), froze ControlNet, and trained on colour, material and hue-rotated conflict rows with loss = masked diffusion + 2&times; colour (decoded x0 on the object mask) + 0.5&times; texture + 0.5&times; preservation to the LoRA-off model. On 12 test photos it gave the highest edge IoU (0.753) but <b>collapsed target similarity</b> (DINO to target 0.359 &rarr; 0.057, CLIP-T 0.263 &rarr; 0.220) and <b>lowered attribute compliance</b> (colour 0.30, material 0.00, swapped reference 0.40, against 0.70, 0.67, 0.70 for the fixed baseline). The outputs followed the sketch but no longer resembled the photo, and the colour and material roles were not learned. Object-vs-sketch conflicts had no exact target and so no training rows, and with 160 training photos and one short run (no repeat seeds) we could not separate over-fitting from a wrong loss design. Neither LoRA was adopted.</li>
+</ul>
+<p><b>Lesson.</b> Detecting conflicts and rescaling global strengths does not enforce attribute-specific control, and trainable gates inside a frozen SDXL received too weak a signal. What moved the output was routing the <b>text path including ControlNet's</b>, so that the reference could supply colour.</p>
+
+<h2>3. ARL experiment and results</h2>
+<p><b>Setup.</b> Held-out photo 0027, three conflict rows (object: &ldquo;Black ape&hellip;&rdquo; with an axe sketch; colour: caption &ldquo;&hellip;black&rdquo; vs brown leather reference; material: &ldquo;&hellip;made of metal&rdquo; vs leather), six arms, identical seed, 512 px, 20 steps, about 7 s per image on a T4. Colour/material hit = output matches the reference; edge IoU = sketch fidelity; DINO-ref = similarity to the reference image; CLIP-T = caption alignment. Controls: schedule-only (separates the router from the schedule) and flags forced to 1 (enforcement without the detector).</p>
+<table style="width:92%;margin:2px auto 3px;break-inside:avoid">
+<tr><th>Method</th><th class="n">Colour hit</th><th class="n">Material hit</th><th class="n">Edge IoU</th><th class="n">DINO-ref</th><th class="n">CLIP-T</th></tr>
+<tr><td>Fixed baseline</td><td class="n">0.33</td><td class="n">0.67</td><td class="n"><b>0.378</b></td><td class="n"><b>0.291</b></td><td class="n">0.205</td></tr>
+<tr><td>Schedule only (control)</td><td class="n"><b>1.00</b></td><td class="n">0.00</td><td class="n">0.066</td><td class="n">0.122</td><td class="n">0.233</td></tr>
+<tr><td>Router</td><td class="n"><b>1.00</b></td><td class="n">0.33</td><td class="n">0.044</td><td class="n">0.147</td><td class="n"><b>0.249</b></td></tr>
+<tr><td>Flag gate</td><td class="n">0.33</td><td class="n">0.33</td><td class="n">0.370</td><td class="n">0.252</td><td class="n">0.210</td></tr>
+<tr><td>Flags forced to 1 (control)</td><td class="n">0.67</td><td class="n"><b>1.00</b></td><td class="n">0.277</td><td class="n">0.249</td><td class="n">0.212</td></tr>
+<tr><td><b>ARL (router + flag gate)</b></td><td class="n"><b>1.00</b></td><td class="n">0.67</td><td class="n">0.059</td><td class="n">0.159</td><td class="n">0.247</td></tr>
+</table>
+<div class="cap"><b>Table 1.</b> Mean over the three pilot rows (n = 3 images per arm; indicative only).</div>
+<img src="qualitative.png" style="width:86%">
+<div class="cap"><b>Figure 1.</b> Pilot outputs (sketch, reference, fixed, router, flag gate, ARL). The ARL column follows the reference's brown leather in all rows and keeps a small axe.</div>
+<p><b>Findings.</b> The ARL reaches the reference colour in 3 of 3 rows and the material in 2 of 3 (fixed: 1 of 3 and 2 of 3). The schedule-only control reaches the same colour score, so most of the colour gain comes from the schedule, not the learned router; the flag gate adds the material gain. The <b>cost is sketch fidelity</b> (edge IoU 0.059 vs 0.378), and the flag gate alone keeps the sketch (0.370) but rarely changes colour. No arm resolves the object conflict (the caption's ape is never produced).</p>
+
+<h2>4. Limitations and future work</h2>
+<ul>
+<li>The ARL result is a <b>one-photo, three-row pilot</b>; the 20-photo test split and the 800 conflict rows are not yet evaluated, and no confidence intervals are reported. Numbers for attempts 1&ndash;3 and 5&ndash;6 are taken from our run reports, not re-run for this report.</li>
+<li><b>Future work (improving the architecture):</b></li>
+<li style="list-style:circle;margin-left:14px"><b>Attribute-specific routing:</b> replace the four global scalars by independent, attribute-aware routing decisions, so identity, geometry, colour and material are controlled separately.</li>
+<li style="list-style:circle;margin-left:14px"><b>Disentangled reference conditioning:</b> build reference representations that keep colour and material but suppress object identity and shape, removing the reference-object leakage seen in Section 2.</li>
+<li style="list-style:circle;margin-left:14px"><b>Spatially-aware conditioning:</b> region-level masks and spatially adaptive gates change a conflicting attribute locally, so sketch-defined geometry (edge IoU) is not disrupted.</li>
+</ul>
+<p style="font-size:8pt">Code, notebooks, per-image scores and all results: repository <i>Harshitha-282007/constraint-driven-multimodal-diffusion</i> (branch <i>governed-pipeline</i>); see <code>README.md</code> and <code>results/pilot_flaggate_v1/</code>.</p>
+</body></html>
+

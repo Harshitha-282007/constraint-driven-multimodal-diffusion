@@ -3,3 +3,14 @@ data/pilot_v1/
 data/reference_images/
 __pycache__/
 .ipynb_checkpoints/
+.pytest_cache/
+*.pyc
+.DS_Store
+# LaTeX build products
+*.aux
+*.log
+*.synctex.gz
+*.out
+
+# keep zips in the outer workspace archive
+!outer_workspace/*.zip

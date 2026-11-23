@@ -27,6 +27,16 @@ def test_missing_neutral_is_ignored():
     assert torch.allclose(Pipeline.controlnet_text(pr, tn, (0, 0, 1)), pr)   # material has no neutral caption
 
 
+def test_mix_text_zero_is_identity_one_is_neutral():
+    pr, pooled = torch.randn(2, 77, 8), torch.randn(2, 16)
+    tn = {"colour": torch.randn(2, 77, 8), "material": torch.randn(2, 77, 8)}
+    pn = {"colour": torch.randn(2, 16), "material": None}
+    a, b = Pipeline.mix_text(pr, pooled, tn, pn, (0, 0))
+    assert torch.equal(a, pr) and torch.equal(b, pooled)
+    a, b = Pipeline.mix_text(pr, pooled, {"colour": tn["colour"], "material": None}, pn, (1, 1))
+    assert torch.allclose(a, tn["colour"], atol=1e-6) and torch.allclose(b, pn["colour"], atol=1e-6)
+
+
 def test_half_flag_is_midpoint():
     pr, tn = _inputs()
     assert torch.allclose(Pipeline.controlnet_text(pr, tn, (0, 0.5, 0)), 0.5 * (pr + tn["colour"]), atol=1e-6)

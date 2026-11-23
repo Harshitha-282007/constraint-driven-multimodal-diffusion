@@ -1,126 +1,154 @@
 # Constraint-Driven Multimodal Diffusion (Text + Sketch + Reference Image)
 
-Team **One Sheep Army** · IE 643 · IIT Bombay
+**IE 643 course project, IIT Bombay. Team: One Sheep Army** (R. Harshitha, 24B0053)
 
-A diffusion pipeline that takes a **text prompt, a sketch and a reference image** and decides which modality controls what:
+One object is generated from a **text caption**, a **sketch** and a **reference image** that may disagree.
+We fix who governs what and ask the model to enforce it:
 
-| Modality | Controls |
+| Modality | Governs |
 |---|---|
-| Sketch | geometry / layout |
-| Text | semantics (what the object is) |
-| Reference image | appearance (colour, material, style) |
+| Sketch | shape and placement |
+| Text | object identity |
+| Reference image | colour and material (**the reference wins colour** when the caption names a different one) |
 
-When the three disagree (a conflict), a small learned **attribute router** sets how strongly each modality acts during denoising.
+## Submission
 
-**Current system:** frozen SDXL + scribble ControlNet (sketch) + IP-Adapter (reference) + SDXL's own text encoders, driven by a trained **governance network** that predicts, per input, which modality governs object identity, colour and material, plus a **fusion LoRA** on the UNet trained so the generator obeys those decisions. The earlier router (6 CLIP cosines → 4 global strengths) is kept as a baseline. An earlier FLUX.1-dev / UniCombine route was dropped (see [What we tried](#what-we-tried-and-moved-on-from)).
+| Item | Where |
+|---|---|
+| Poster (A1, 594 x 841 mm), PDF | [`poster/OneSheepArmy_IE643_CourseProject_Poster.pdf`](poster/OneSheepArmy_IE643_CourseProject_Poster.pdf) |
+| Poster, LaTeX source (course template) | [`poster/latex/`](poster/latex) |
+| Novelty assessment report (2 pages) | [`report/OneSheepArmy_IE643_NoveltyAssessment_report.pdf`](report/OneSheepArmy_IE643_NoveltyAssessment_report.pdf) |
+| Submitted method: the **Attribute Routing Layer (ARL)** | this README, [`src/pipeline.py`](src/pipeline.py), [`src/router.py`](src/router.py), [`src/governance/`](src/governance) |
+| Run that produced the ARL results | notebook [`notebooks/11_pilot_flag_gate.ipynb`](notebooks/11_pilot_flag_gate.ipynb), outputs in [`results/pilot_flaggate_v1/`](results/pilot_flaggate_v1) |
+| Live demo (Gradio, needs a Colab T4) | notebook [`notebooks/12_arl_live_demo.ipynb`](notebooks/12_arl_live_demo.ipynb); recorded replay in [`app/arl_demo_replay.html`](app/arl_demo_replay.html) |
+| Results of every approach tried | [Results of all tries](#results-of-all-tries) below, detail in [`docs/`](docs) |
+| Demo video | Google Drive folder, linked by the QR code on the poster |
 
-## Governed pipeline (current method)
+## The submitted method: Attribute Routing Layer (ARL)
 
-> Status: the code below is written and its pure-Python parts are unit-tested (`pytest tests/`). The GPU parts (notebooks 05–07) have **not been run yet**, so there are no results for this method in the repo.
+The ARL sits between the three inputs and a **frozen** SDXL + scribble ControlNet + IP-Adapter backbone. No diffusion weights are trained; it fits a free Colab T4 (about 10 GB, about 7 s per 512 px image, 20 steps).
 
-Rules: geometry and layout come from the sketch; object identity from the text; a colour or material the caption states stays with the text, otherwise the reference supplies it.
+```
+ text ----------\                               +--> flag-gated text (UNet text, ControlNet text, pooled embedding)
+ sketch --------+--> frozen CLIP ViT-L/14 --+   |
+ reference -----/    features               +--> governance network --> flags g_obj, g_col, g_mat
+                                            +--> router MLP --------> ControlNet scale, hold time, IP-Adapter scale, CFG
+                                                                       |
+                                  frozen SDXL + scribble ControlNet + IP-Adapter ViT-H --> image
+```
 
-| Step | Where | What it does |
+| Part | Code | What it does |
 |---|---|---|
-| Gate labels | `src/governance/labels.py` | Rule labels for three gates (`g_obj`, `g_col`, `g_mat`) from metadata; generates thousands of conflict rows without generating any image. |
-| Governance network | `src/governance/model.py`, `features.py`, notebook `05` | Frozen CLIP ViT-L/14 embeddings of caption, object phrase, sketch, reference, grey reference and the colour part (reference − grey reference) → three gates. Compared with the old six-cosine detector and on captions reworded with synonyms the rules do not know. Output: `models/governance.pt`. |
-| Enforcement | `src/pipeline.py` | The reference embedding is split into a colour part and a texture part and only the governed part is injected, into the style block only; the sketch is relaxed only when the object gate is on; the caption is left as is. |
-| Fusion LoRA | `src/train_fusion_lora.py`, notebook `06` | LoRA on the SDXL UNet, trained on (target, sketch, reference, caption) with role dropout: the reference is randomly greyscaled, or the caption's colour words removed, so the model learns both "colour from the text" and "colour from the reference" against the real photo. Output: `models/fusion_lora.safetensors`. |
-| Evaluation | `src/governance/evalkit.py`, `metrics.py`, notebook `07` | Text–image alignment, sketch consistency, reference similarity, perceptual quality, layout consistency, plus per-attribute adherence; paired bootstrap over base photos. |
-| Interface | `app/app.py` | Shows the predicted gates and which modality governed what; old arms remain selectable. |
+| Governance network (trained) | `src/governance/model.py`, `features.py`, `labels.py`, notebook `05` | Frozen CLIP embeddings of six slots (caption, object phrase, sketch, reference, grey reference, colour part), shared projection + slot embeddings + 15 pairwise cosines -> MLP -> three conflict flags. Trained with weighted BCE on rule labels generated from metadata (no images generated); Platt-calibrated on validation photos. |
+| Router (trained) | `src/router.py`, notebook `04`, `models/router.pt` | Six CLIP cosines -> MLP (32-32-4, sigmoid) -> ControlNet scale, sketch hold time, IP-Adapter scale, CFG. Five-fold ensemble trained on a one-factor-at-a-time grid (9 generated variants per training item). |
+| Flag-gated text | `Pipeline.mix_text`, `Pipeline.run(text_flags=...)` in `src/pipeline.py` | Colour words -> "colored", material words -> "solid". Embedding `p' = p - f (p - p_neutral)` with `f` the colour or material flag, applied to the UNet text, the **ControlNet text** and the pooled embedding. Applying it to the ControlNet text closes the leak where the caption's colour still reached the UNet through ControlNet. |
+| Schedule | `sketch_schedule`, `ip_shape`, `style_block` in `src/pipeline.py` | Sketch held, then relaxed (x0.3); reference enters through the style block only; geometry first, appearance later. |
 
-Where the mechanisms come from: colour/texture split of the IP-Adapter embedding from [SADis](https://arxiv.org/abs/2503.14275) (used without its SVD rescaling); style-block-only injection from [InstantStyle](https://arxiv.org/abs/2404.02733); relaxing ControlNet under object conflict from [SmartControl](https://arxiv.org/abs/2404.06451) (here a gate-driven scalar, not their learned map); training with all conditions present from [UniCombine](https://arxiv.org/abs/2503.09277)'s denoising LoRA. The governance network, the role dropout and the adherence evaluation are ours. Background and literature notes are in `STAGE1_CURRENT_STATE.md` … `NOVELTY_ASSESSMENT_PLAN.md`.
+### Headline result (pilot, one held-out photo, three conflict rows)
 
-## Pipeline at a glance
+Held-out photo 0027, rows `obj`, `col`, `mat`; identical seed, 512 px, 20 steps; n = 3 images per arm, so **indicative only**.
 
-```
-Sketchy database
-   │  sketchy_make_csv ........ pairs CSV + Qwen3-VL-2B captions (200 photos)
-   │  sketchy_reference_v2 .... generated reference images (segmented, filtered)
-   │  01_freeze_pilot_dataset . pilot_v1: aligned (target, sketch, reference, caption)
-   │  01b_add_conflicts ....... labeled conflict rows
-   ▼
-02 SDXL baseline  →  03 gated fusion  →  04 attribute router  →  05 evaluate all runs
-```
+| Method | Colour hit | Material hit | Edge IoU | DINO-ref | CLIP-T |
+|---|---|---|---|---|---|
+| Fixed baseline | 0.33 | 0.67 | **0.378** | **0.291** | 0.205 |
+| Schedule only (control) | **1.00** | 0.00 | 0.066 | 0.122 | 0.233 |
+| Router | **1.00** | 0.33 | 0.044 | 0.147 | **0.249** |
+| Flag gate | 0.33 | 0.33 | 0.370 | 0.252 | 0.210 |
+| Flags forced to 1 (control) | 0.67 | **1.00** | 0.277 | 0.249 | 0.212 |
+| **ARL (router + flag gate)** | **1.00** | 0.67 | 0.059 | 0.159 | 0.247 |
+
+Per-image scores: [`results/pilot_flaggate_v1/scores.csv`](results/pilot_flaggate_v1/scores.csv). Images: [`contact_sheet.png`](results/pilot_flaggate_v1/contact_sheet.png), [`pilot_qualitative.png`](results/figures/pilot_qualitative.png).
+
+What it shows, stated plainly:
+- The ARL reaches the reference colour in 3 of 3 rows and the material in 2 of 3 (fixed baseline: 1 of 3 and 2 of 3).
+- The schedule-only control reaches the same colour score, so most of the colour gain comes from the schedule, not the learned router.
+- **The cost is sketch fidelity** (edge IoU 0.059 vs 0.378). The flag gate alone keeps the sketch (0.370) but rarely changes colour.
+- No arm resolves the **object conflict** (the caption's ape is never produced in any row).
+- One photo and three rows is a pilot. Evaluation on all 20 test photos and the 800 conflict rows is future work.
+
+## Results of all tries
+
+Everything below was run on the 200-photo Sketchy pilot (`pilot_v1`, 160 / 20 / 20 split by photo). Raw outputs are on Drive (see [Not in this repo](#not-in-this-repo-too-large-kept-on-google-drive)); the numbers here are copied from the run reports. Full histories are in [`docs/`](docs).
+
+| # | Approach | Where | Result | Outcome |
+|---|---|---|---|---|
+| 1 | **SDXL baseline**: frozen SDXL + scribble ControlNet + IP-Adapter, fixed strengths | `notebooks/02_sdxl_baseline_model.ipynb` | Works roughly, but the reference copies its own object: DINO to reference 0.673 vs to target 0.105. | Baseline |
+| 2 | **Gated fusion MLP** | `notebooks/03_gated_fusion_model.ipynb` | Superseded by the router's attribute-tied outputs. | Dropped |
+| 3 | **Attribute router**: 6 CLIP cosines -> 4 global strengths | `notebooks/04_attribute_router_model.ipynb`, `models/router.pt` | No better than the hand schedule (beats a constant on 1 of 4 outputs); cosines cannot see colour or material conflicts; guidance caused artefacts. | Kept as a component of the ARL |
+| 4 | **Governance network**: frozen CLIP features -> 3 conflict flags | `notebooks/05_governance_network.ipynb`, `src/governance/` | Detection works: colour 0.755 (old detector 0.540), material 0.940 (0.643). But images barely changed: colour hit 0.40, same as the schedule; flipping the colour gate changed pixels by only 7.8/255. | Kept as a component of the ARL |
+| 5 | **Fusion LoRA** on the whole UNet | `notebooks/06_fusion_lora.ipynb`, `07_governed_eval.ipynb`, `src/train_fusion_lora.py` | Object conflicts resolved 8 of 8 (vs 2 of 8) and more realistic images, but edge IoU fell 0.369 -> 0.230: it learned to ignore the sketch. | Dropped |
+| 6 | **Role gates inside SDXL** v1 to v3 (learned per-layer gates on text, sketch and reference paths) | `notebooks/08_role_gates_train.ipynb`, `09_role_gates_eval.ipynb`, `src/rolegate/`, `src/train_role_gates.py` | v1: sketch gates saturated, sketch ignored. v2: sketch fixed, colour still followed the text. v3: no gate moved more than 0.06 from its start (run stopped at step 450 of 600); effects came from hand-set initial values. Led to finding the ControlNet caption leak. | Dropped |
+| 7 | **Colour adapter** (palette -> UNet residuals) and **role LoRA** | `src/coloradapter/`, `src/rolelora/`, `src/train_colour_adapter.py`, `src/train_role_lora.py`, notebook `10` | Palette adapter ignored; role LoRA raised edge IoU to 0.753 on 12 test photos but target similarity (DINO to target) fell 0.359 -> 0.057 and colour / material compliance dropped to 0.30 / 0.00. | Dropped |
+| 8 | **Neutral caption + IP-Adapter scale 1.0** (rule applied outside the model), 12 test photos | `src/pipeline.py` | Object compliance 0.10 -> 0.30, edge IoU 0.213 -> 0.376; colour 0.70 and material 0.67 unchanged; swapped reference 0.70 -> 0.00. | Earlier submission candidate |
+| 9 | **ARL = router + flag-gated text** (submitted) | `notebooks/11_pilot_flag_gate.ipynb`, `src/pilot_flag_gate.py` | Table above: reference colour in 3 of 3 pilot rows, at a cost in sketch fidelity. | **Submitted** |
+| 10 | M1: conditional routing of the text colour / material channel by distillation | `src/m1/`, `tests/test_m1_routing.py` | Experimental code and unit tests only; no results reported. | Not evaluated |
+| 11 | FLUX.1-dev + UniCombine | `notebooks/unicombine_flux_attempt/` | Training ran out of memory on the free T4 at the first step. | Dropped |
+| 12 | Reference images v1 (SDXL + IP-Adapter) | `notebooks/data_prep/sketchy_reference_ipadapter.ipynb` | Generated references came out wrong; v2 segments the object onto grey and filters candidates. | Replaced by v2 |
+
+**Lesson:** detecting conflicts and rescaling global strengths does not enforce attribute-specific control. What moved the output was routing the **text path, including ControlNet's**, so the reference could supply colour; learned gates inside SDXL did not train.
+
+## Data
+
+Source: the [Sketchy database](https://sketchy.eye.gatech.edu/) (125 classes, 12,500 photos, 75,481 sketch-photo pairs). We use 200 photos, one object each.
+
+| Property | Value |
+|---|---|
+| Split | 160 train / 20 val / 20 test, by photo (`pilot_v1`) |
+| Captions | Qwen3-VL-2B-Instruct prompted with each photo and its Sketchy class as a hint (`data/sketchy_captions_sample.csv`) |
+| Reference | neutral object (vase, mug, ball, bottle, box) carrying the photo's colour, material and finish, segmented on grey (`data/sketchy_with_refs_v2.csv`) |
+| Conflict rows | +800: object, colour, material, swapped reference (`notebooks/data_prep/01b_add_conflicts.ipynb`); `src/governance/labels.py` generates more from metadata |
+
+| Notebook | What it does |
+|---|---|
+| `data_prep/sketchy_make_csv.ipynb` | Builds `sketchy_pairs.csv`, then captions 200 sampled photos. |
+| `data_prep/sketchy_reference_v2.ipynb` | Reference images v2 (segmentation, neutral objects, VLM-extracted colour / material / finish, DINO and appearance filters). |
+| `01_freeze_pilot_dataset.ipynb` | Freezes `pilot_v1`: aligned (target, sketch, reference, caption) with a fixed seed; keeps all 200 samples (18 failed the reference filters, 23 have unverified segmentation). CPU only. |
+| `data_prep/01b_add_conflicts.ipynb` | Adds the labelled conflict rows without touching `pilot_v1.zip`. |
 
 ## Repo layout
 
 ```
 .
 ├── README.md
-├── data/
-│   ├── sketchy_pairs.csv              # all 75,481 sketch-photo pairs (125 categories)
-│   ├── sketchy_captions_sample.csv    # 200 captioned photos
-│   ├── sketchy_with_refs.csv          # + v1 reference paths (superseded)
-│   └── sketchy_with_refs_v2.csv       # + v2 reference paths (current)
-├── models/
-│   └── router.pt                      # trained router MLP weights
+├── poster/                  final poster: PDF, LaTeX source, HTML source, figure script
+│   ├── latex/               course-template LaTeX project (compile with pdflatex)
+│   ├── figures/, pilot_images/, make_figures.py, poster.html, build.ps1
+├── results/                 outputs of the ARL pilot (scores, contact sheet, notebook with outputs)
+├── docs/                    stage reports, literature review, plans for each attempt
+├── data/                    captions, pairs, reference tables (images stay on Drive)
+├── models/router.pt         trained router weights
 ├── src/
-│   ├── eval_metrics.py                # evaluation metrics
-│   └── sketchy_loader.py              # dataset classes for the FLUX / UniCombine trainers
-└── notebooks/
-    ├── data_prep/                     # dataset generation
-    │   ├── sketchy_make_csv.ipynb
-    │   ├── sketchy_reference_ipadapter.ipynb   # reference v1 (superseded)
-    │   ├── sketchy_reference_v2.ipynb          # reference v2 (current)
-    │   └── 01b_add_conflicts.ipynb
-    ├── 01_freeze_pilot_dataset.ipynb
-    ├── 02_sdxl_baseline_model.ipynb
-    ├── 03_gated_fusion_model.ipynb
-    ├── 04_attribute_router_model.ipynb
-    ├── final_output_eval.ipynb        # notebook "05": scores every run side by side
-    └── unicombine_flux_attempt/       # abandoned FLUX route
+│   ├── pipeline.py          Pipeline (frozen SDXL + ControlNet + IP-Adapter), mix_text, schedules
+│   ├── router.py            RouterEnsemble
+│   ├── governance/          labels, features, GovernanceNet, metrics, EvalKit
+│   ├── pilot_flag_gate.py   the pilot behind the headline table
+│   ├── rolegate/, rolelora/, coloradapter/, m1/    attempts 5-7 and 10
+│   └── eval_metrics.py, eval_roles.py, sketchy_loader.py, train_*.py
+├── notebooks/               01-11 + data_prep/ + unicombine_flux_attempt/
+├── app/app.py               Gradio interface
+└── tests/                   unit tests (CPU)
 ```
+
+## Running it
+
+1. Open a notebook in Colab with a T4 GPU (01 and 01b run on CPU) and mount Drive. Notebooks use `ROOT = /content/drive/MyDrive/sketchy_dataset_one_sketch`.
+2. Data: `sketchy_make_csv` -> `sketchy_reference_v2` -> `01_freeze_pilot_dataset` -> `01b_add_conflicts`.
+3. Components: `02` (baseline) -> `04` (router, writes `models/router.pt`) -> `05_governance_network` (writes `governance/governance.pt` on Drive).
+4. **ARL pilot: `11_pilot_flag_gate`.** It clones the repo, loads `pilot_v1.zip` and `governance.pt` from Drive and writes images, `scores.csv`, `config.json` and `contact_sheet.png`. Without `governance.pt` it falls back to rule-label ("oracle") flags and says so.
+5. SDXL, scribble ControlNet and IP-Adapter weights download from Hugging Face on first run.
+
+Unit tests (CPU, no GPU needed):
+
+```
+pip install pytest torch numpy pandas pillow
+PYTHONPATH=src python -m pytest -q tests      # 43 passed, 3 skipped at submission
+```
+
+Poster: `python poster/make_figures.py` regenerates the figures; `poster/build.ps1` builds the PDF from `poster/poster.html` with headless Edge (Windows). The LaTeX source in `poster/latex/` is the course template and was not compiled locally.
 
 ## Interface
 
-`app/app.py` is a Gradio app. Upload a sketch and a reference image, write a caption, and it shows the governed
-output together with the gates the governance network predicted and which modality governed each property.
-The old arms (fixed / scheduled / router / router_guided) remain selectable for comparison.
-
-    pip install -r app/requirements.txt
-    cd app && python app.py
-
-It needs `models/governance.pt` (from notebook 05). `models/fusion_lora.safetensors` (from notebook 06) is optional
-and adds a "Governed + fusion LoRA" method when present.
-
-Needs a GPU (SDXL + ControlNet + IP-Adapter use roughly 10 GB). On Colab, run it in a T4 notebook and use
-`share=True` to get a public link.
-
-## Dataset generation
-
-Source data is the [Sketchy database](https://sketchy.eye.gatech.edu/) (human-drawn sketches paired with photos): 125 categories × 100 photos = 12,500 photos, 75,481 sketch-photo pairs.
-
-| Notebook | What it does |
-|---|---|
-| `data_prep/sketchy_make_csv.ipynb` | Builds `sketchy_pairs.csv` (category, image_path, sketch_path), then captions 200 randomly sampled photos with **Qwen3-VL-2B-Instruct** (the category is passed in the prompt as a hint) → `sketchy_captions_sample.csv`. |
-| `data_prep/sketchy_reference_ipadapter.ipynb` | Reference images v1: SDXL + style-only IP-Adapter fed with the target photo. Outputs looked wrong; kept for the record. → `sketchy_with_refs.csv` |
-| `data_prep/sketchy_reference_v2.ipynb` | Reference images v2: object segmented onto neutral gray, neutral objects (vase / mug / ball / bottle / box), colour / material / finish extracted by a VLM into the prompt, 3-4 candidates per photo filtered on low DINO similarity plus an appearance check. 182 of 200 photos passed; 26 segmentation failures. → `sketchy_with_refs_v2.csv` |
-| `01_freeze_pilot_dataset.ipynb` | Freezes the pilot as `pilot_v1`: every sample is an aligned (target photo, sketch, reference, caption) quadruple at one resolution, split **by photo** with a fixed seed, role tags attached (`sketch→geometry, text→semantics, reference→appearance`). Runs on CPU. Output: `pilot_v1.zip` + manifest. |
-| `data_prep/01b_add_conflicts.ipynb` | Adds **labeled conflicts** without touching `pilot_v1.zip`. Writes `metadata_conflicts.jsonl` and `metadata_with_conflicts.jsonl`. Conflict kinds: `sem` (caption vs sketch object), `color` and `material` (caption vs reference), `app` (swapped reference). Each conflict row keeps its base photo's split. |
-
-## Model notebooks
-
-All are Colab notebooks written for a free T4 with Google Drive mounted. 03 and 04 are standalone (they reload everything).
-
-| Notebook | What it does |
-|---|---|
-| `02_sdxl_baseline_model.ipynb` | **Baseline, no training.** Four modes on the `pilot_v1` test split with everything frozen: `text`, `text_sketch`, `text_ref`, `text_sketch_ref`. |
-| `03_gated_fusion_model.ipynb` | **Gating MLP.** CLIP similarities between modalities per attribute (object, appearance) → 6 conflict features. Stage A generates a grid of (ControlNet scale, IP-Adapter scale) per train item and scores it to get soft-best targets; the MLP predicts ControlNet and IP-Adapter amplitudes. Arms: `fixed`, `scheduled` (geometry first, appearance later), `gate`, `gate_guided` (latent guidance with a sketch-edge geometry loss and an attribute-level appearance loss). |
-| `04_attribute_router_model.ipynb` | **Previous method, now the baseline.** Router MLP with 4 attribute-tied outputs: sketch strength + sketch hold time (geometry), reference strength (appearance), text guidance (semantics). Custom denoising loop with per-step modality weights and constraint guidance. Trained on a one-factor-at-a-time grid (9 images per train item), checked with 5-fold CV, evaluated on held-out items per conflict kind with paired bootstrap confidence intervals. Arms: `fixed`, `scheduled`, `router`, `router_guided`. Ends with an optional Gradio interface (upload sketch + reference, write a caption, see all four arms with the router's chosen weights). Run `01b` first. |
-| `final_output_eval.ipynb` | Re-scores every generated image under `sketchy_dataset_one_sketch/sdxl_runs` (`sdxl_baseline_v1`, `gated_v1`, `router_v2`) with the same held-out metrics so runs can be compared. Note that runs differ in resolution and steps, so compare arms within a run first. |
-
-Supporting files:
-- `src/eval_metrics.py`: per-image CLIP-T, CLIP-I and DINO-I (vs reference), DreamSim and LPIPS (vs target), layout IoU (CLIPSeg masks), sketch recall (share of sketch strokes landing on an output edge); set-level FID (only meaningful on a few hundred images). AP, the GPT-4o attribute judge and conflict-set scoring are not implemented yet.
-- `models/router.pt`: weights of the trained router. The run called v3 in notebook 04 was saved in a folder named `router_v2` on Drive.
-
-## What we tried and moved on from
-
-| Attempt | Where | Why it was dropped |
-|---|---|---|
-| FLUX.1-dev + UniCombine (cache, condition LoRAs, union LoRA, generate, evaluate) | `notebooks/unicombine_flux_attempt/`, `src/sketchy_loader.py` | The notebooks were written, but training ran out of memory on the free T4 at the first step. Replaced by the SDXL baseline with frozen pretrained adapters. The pilot dataset did not change. |
-| Reference images v1 (SDXL + IP-Adapter) | `data_prep/sketchy_reference_ipadapter.ipynb` | Generated references came out wrong; v2 segments the object and filters candidates. |
-| Gated fusion (`03`) | `notebooks/03_gated_fusion_model.ipynb` | Kept as the step before the router, which replaces it with attribute-tied outputs and a hold-time control. |
+`app/app.py` is a Gradio app (`pip install -r app/requirements.txt`, then `cd app && python app.py`, `share=True` on Colab). It needs `models/governance.pt` from notebook 05.
 
 ## Not in this repo (too large, kept on Google Drive)
 
@@ -129,20 +157,12 @@ Supporting files:
 | `sketchy.zip`, the raw Sketchy database | ~1.1 GB | My Drive root |
 | `pilot_v1.zip`, the frozen pilot | ~103 MB | `sketchy_dataset_one_sketch/` |
 | `reference_images/`, `ref_v2_backup.zip` | folder / zip | `sketchy_dataset_one_sketch/` |
-| `sdxl_runs/`, the generated outputs, scores and manifests for every run | folders | `sketchy_dataset_one_sketch/` |
-
-## Running it
-
-1. Open a notebook in Colab with a T4 GPU (01 and 01b run on CPU) and mount Drive. Notebooks use `ROOT = /content/drive/MyDrive/sketchy_dataset_one_sketch`.
-2. Run in this order: `sketchy_make_csv` → `sketchy_reference_v2` → `01_freeze_pilot_dataset` → `01b_add_conflicts` → `02` → `03` → `04` → `final_output_eval`.
-3. Notebooks 02 to 04 download SDXL, scribble ControlNet and IP-Adapter weights from Hugging Face on first run.
-
-For the current method, after the data notebooks: push the code, then run `05_governance_network` → `06_fusion_lora` (run its memory test first) → `07_governed_eval`, and copy `governance.pt` and `fusion_lora.safetensors` into `models/`. Notebook 01b's resolution policy text was revised; rerun it if you want the stored `expected_resolution` field to match (the new notebooks do not depend on it).
+| `sdxl_runs/` (generated outputs, scores, manifests for every run, including `pilot_flaggate_v1`) | folders | `sketchy_dataset_one_sketch/` |
+| `governance/governance.pt`, `role_gates*/` | checkpoints | `sketchy_dataset_one_sketch/governance/` |
 
 ## Notes
 
-- The router runs reported so far used `RELAX = 0.3` (sketch strength after the hold time) and `GUIDE_W = 0.25` (constraint guidance weight), as in the code. Earlier slides and the report state 0.7 and 0.03; those figures are wrong.
-- `01_freeze_pilot_dataset` keeps **all 200** samples (the filter lines are commented out), including 18 that failed the reference filters and 23 with unverified segmentation. The fusion LoRA trains only on rows that passed both.
-
-- Notebook outputs are stripped before committing (`nbstripout`), so figures and tables are regenerated by running them.
+- The router runs reported used `RELAX = 0.3` (sketch strength after the hold time) and `GUIDE_W = 0.25` (constraint guidance weight), as in the code. Earlier slides stated 0.7 and 0.03; those figures were wrong.
+- Notebooks 01-04, `final_output_eval` and the data-prep notebooks keep their saved outputs; notebooks 05-11 are stored without outputs (the output copy of notebook 11 is in `results/pilot_flaggate_v1/`).
 - The Sketchy database has its own licence; this repo contains only paths, captions and metadata, not the images.
+- The poster template is the course template (a0poster class by Kettl and Weiser, CC BY-NC-SA 3.0).

@@ -1,0 +1,262 @@
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% IE643 course poster, A1 portrait, course template layout (a0poster class, framed two-column body).
+% Template: a0poster class by Kettl and Weiser (CC BY-NC-SA 3.0); design Timothy Kodikara.
+% Compile (twice) with:  pdflatex OneSheepArmy_IE643_Poster.tex
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\documentclass[a1,portrait]{a0poster}
+\usepackage[top=3.5cm, bottom=0.3cm, left=3.5cm, right=2cm]{geometry}
+\usepackage[compact]{titlesec}
+\usepackage{multicol}
+\columnsep=70pt
+\columnseprule=10pt
+\usepackage[svgnames]{xcolor}
+\usepackage{palatino}
+\usepackage{xkeyval}
+\usepackage{graphicx}
+\setlength{\abovecaptionskip}{5pt plus 5pt minus 3pt}
+\graphicspath{{figures/}}
+\usepackage{booktabs}
+\usepackage[font=small,labelfont=bf]{caption}
+\usepackage{amsfonts, amsmath, amsthm, amssymb}
+\usepackage{csquotes}
+\usepackage{wrapfig}
+\usepackage{multirow}
+\usepackage{makecell}
+\usepackage{array}
+\usepackage{url}
+\def\columnseprulecolor{\color{NavyBlue}}%
+\usepackage{framed}
+\colorlet{frameborder}{NavyBlue}
+%----------------------------------------------------------------------------------------
+%	POSTER HEADER
+%----------------------------------------------------------------------------------------
+\begin{document}
+\begin{minipage}[c]{\linewidth}
+\vspace{0.1cm}
+\noindent\makebox[\textwidth][c]{
+\begin{minipage}[c]{0.14\linewidth}
+\vspace{0pt}\raggedright
+\hspace{1cm}
+\includegraphics[scale=1.3,width=\linewidth]{figures/logo.png}
+\end{minipage}
+\hfill
+\begin{minipage}[c]{0.75\textwidth}
+\centering
+\Huge \color{Green} \textbf{IE643 Course Project}\\[0.4cm]
+\Huge \color{NavyBlue} \textbf{Constraint-Driven Multimodal Diffusion\\ using Text, Sketch and Reference Image}\\[0.4cm]
+\Large \color{NavyBlue} \textbf{One Sheep Army}\\[0.4cm]
+\large \color{Black} \textbf{R. Harshitha $^{1}$ (24B0053)}\\[0.2cm]
+\small \text{24b0053@iitb.ac.in$^{1}$}\\
+\end{minipage}
+\begin{minipage}[c]{0.145\textwidth}
+\vspace{0pt}\raggedleft
+\includegraphics[scale=1.3,width=\linewidth]{figures/IE643-Logo.pdf}
+\hspace{1cm}
+\end{minipage}}
+\\[0.1cm]%
+%----------------------------------------------------------------------------------------
+\color{NavyBlue}\setlength\FrameRule{18pt}
+\begin{framed}
+\vspace{0.4cm}
+\begin{multicols}{2}
+%----------------------------------------------------------------------------------------
+%	Abstract
+%----------------------------------------------------------------------------------------
+\color{Black}
+\section*{Abstract}
+Multimodal diffusion models combine different conditioning signals, but conflicting instructions can cause one modality to override information from another. This project investigates \textbf{attribute-level control} in multimodal image generation, assigning distinct roles to \textbf{text (object identity)}, \textbf{sketches (geometry)} and \textbf{reference images (colour and material)}. We develop an \textbf{Attribute Routing Layer (ARL)}, integrating a learned conflict-detection network, a conditioning-strength router and flag-gated text adjustments with a frozen SDXL, ControlNet and IP-Adapter pipeline, and test it on object, colour, material and swapped-reference conflicts built from Sketchy. Preliminary pilot results (one held-out photo, three conflict rows) show improved reference-attribute compliance (reference colour reached in 3 of 3 rows vs 1 of 3 for the fixed baseline), but also reveal trade-offs in sketch fidelity (edge IoU 0.059 vs 0.378) and unresolved object-identity conflicts. Our findings highlight the limitations of global conditioning adjustments and the challenges of achieving reliable attribute-specific control in diffusion models.
+
+%----------------------------------------------------------------------------------------
+%	INTRODUCTION
+%----------------------------------------------------------------------------------------
+\section*{Introduction}
+\begin{itemize}
+	\item Multimodal generators take text, sketch and reference together; when they conflict (caption says \emph{black}, reference is brown leather) the strongest pathway silently wins.
+	\item A reference image also carries its own object shape, so turning it up leaks the wrong identity.
+	\item Giving each modality \textbf{one attribute} makes conflicts well-posed and measurable per attribute.
+	\item Deep learning is needed because the conflict is semantic: colour, material and identity must be compared in a learned embedding space.
+\end{itemize}
+\vspace{-\baselineskip}
+\begin{center}
+\includegraphics[width=0.6\linewidth]{figures/Intro.png}
+\captionof{figure}{\color{Blue}Who governs what. Where inputs conflict, the reference wins colour.}
+\label{Intro}
+\end{center}
+We outline our major \textbf{contributions} below:
+\vspace{-\baselineskip}\\
+\begin{itemize}
+	\item A \textbf{per-attribute governing rule} for text, sketch and reference, with labelled object, colour, material and swapped-reference conflict rows built on Sketchy.
+	\item The \textbf{Attribute Routing Layer}: a trained governance network (conflict flags) and a trained router (strengths), driving flag-gated text on frozen SDXL. No diffusion weights are changed; it runs on a free Colab T4.
+	\item An \textbf{attribute-wise evaluation} and a documented set of negative results (LoRA, role gates, colour adapter) that explain why this design was chosen.
+\end{itemize}
+
+%----------------------------------------------------------------------------------------
+%	Workflow
+%----------------------------------------------------------------------------------------
+\color{Black}
+\section*{Workflow}
+Figure \ref{workflow} illustrates the workflow, from data preparation through the baselines and failed attempts to the submitted ARL.
+\begin{center}
+	\includegraphics[width=0.75\linewidth]{figures/Workflow.png}
+	\captionof{figure}{\color{Blue} Overall workflow.}
+	\label{workflow}
+\end{center}
+
+%----------------------------------------------------------------------------------------
+%	Methodology
+%----------------------------------------------------------------------------------------
+\section*{Methodology}
+Figure \ref{Arch} illustrates the architecture. The three inputs are encoded with frozen CLIP ViT-L/14. Two small trained networks estimate attribute-conflict flags and global conditioning parameters, which steer the conditioning of a frozen SDXL pipeline; no diffusion weights are trained.
+\begin{itemize}
+	\item \textbf{Governance network.} Six CLIP slots (caption, object phrase, sketch, reference, grey reference, colour part) $\rightarrow$ shared projection + slot embeddings + 15 pairwise cosines $\rightarrow$ MLP $\rightarrow$ conflict flags $g_{obj}, g_{col}, g_{mat}$. Trained with weighted BCE on rule-generated labels (no generated-image supervision) and Platt-calibrated on validation photos.
+	\item \textbf{Router.} Six CLIP cosines $\rightarrow$ MLP (32-32-4, sigmoid) $\rightarrow$ four global parameters: ControlNet scale $cs$ [0.5, 1.4], sketch hold time [0.4, 1.0], IP-Adapter scale $ip$ [0.2, 0.8], CFG [4, 10]. Five-fold ensemble trained on a one-factor-at-a-time grid (9 generated variants per training item).
+	\item \textbf{Flag-gated text.} Colour words $\rightarrow$ ``colored'', material words $\rightarrow$ ``solid''. The text embedding becomes $p' = p - f\,(p - p_{neutral})$, with $f$ the colour or material flag. Applied to UNet text, \textbf{ControlNet text} and the pooled embedding, which closes the leak where the caption's colour still reached the UNet through ControlNet.
+	\item \textbf{Backbone and schedule.} Frozen SDXL, scribble ControlNet and IP-Adapter ViT-H. The sketch is held, then relaxed ($\times$0.3); the reference enters through the style block only. 512 px, 20 steps, about 7 s per image and 10 GB on a T4.
+\end{itemize}
+
+%----------------------------------------------------------------------------------------
+%	Dataset Details
+%----------------------------------------------------------------------------------------
+\color{Black}
+\section*{Dataset Details}
+Built on the Sketchy database (125 classes, 12,500 photos, 75,481 sketch--photo pairs). We use 200 captioned photos, one object each.
+\begin{center}
+\small
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{|p{0.22\linewidth}|p{0.68\linewidth}|}
+\hline
+\textbf{Property} & \textbf{Value}\\
+\hline
+Photos used & 200 (train 160, val 20, test 20; split by photo)\\
+\hline
+Sketch, caption & one human sketch per photo; captions generated by prompting Qwen3-VL-2B-Instruct with each photo and its Sketchy class as a hint\\
+\hline
+Reference & neutral object (vase, mug, ball, bottle, box) carrying the photo's colour, material, finish; segmented on grey\\
+\hline
+Conflict rows & +800: object, colour, material, swapped reference\\
+\hline
+\end{tabular}
+\captionof{table}{\color{Blue} Dataset characteristics.}
+\end{center}
+
+\columnbreak
+%----------------------------------------------------------------------------------------
+%	Architecture figure (top of the second column, as in the template)
+%----------------------------------------------------------------------------------------
+\begin{center}
+	\includegraphics[width=0.62\linewidth]{figures/Architecture.png}
+	\captionof{figure}{\color{Blue} Overall architecture: the ARL routes each attribute to one pathway of frozen SDXL.}
+	\label{Arch}
+\end{center}
+
+%----------------------------------------------------------------------------------------
+%	Novelty Assessment
+%----------------------------------------------------------------------------------------
+\color{Black}
+\section*{Novelty Assessment}
+\begin{center}
+\small
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{|p{0.27\linewidth}|p{0.63\linewidth}|}
+\hline
+\textbf{Approach} & \textbf{Observation}\\
+\hline
+\textbf{Fixed / scheduled}, learned router & reference copies its own object (DINO to reference 0.673 vs 0.105 to target); router beats a constant on 1 of 4 outputs and is blind to colour and material\\
+\hline
+\textbf{Governance network} & detects conflicts: colour 0.755 (old 0.540), material 0.940 (old 0.643); images alone barely changed\\
+\hline
+\textbf{Fusion LoRA} on UNet & object conflicts 8/8 (vs 2/8), but edge IoU fell 0.369 $\rightarrow$ 0.230\\
+\hline
+\textbf{Role gates} in SDXL & no gate moved more than 0.06 from its start; colour followed the text\\
+\hline
+\textbf{Neutral caption} + IP scale 1.0 (12 test photos) & object 0.10 $\rightarrow$ 0.30, edge IoU 0.213 $\rightarrow$ 0.376; colour 0.70 and material 0.67 unchanged; swapped reference 0.70 $\rightarrow$ 0.00\\
+\hline
+\textbf{ARL} = router + flag gate (submitted) & reference colour reached on 3/3 pilot rows; sketch fidelity drops (Table \ref{table}). Routing the text path, incl.\ ControlNet's, is what lets the reference win colour\\
+\hline
+\end{tabular}
+\captionof{table}{\color{Blue} Experiments run for novelty assessment.}
+\end{center}
+
+%----------------------------------------------------------------------------------------
+%	Results
+%----------------------------------------------------------------------------------------
+\color{Black}
+\section*{Results}
+Pilot: held-out photo 0027, three conflict rows, six arms, same seed. Hit = output colour or material matches the reference.
+\begin{center}
+	\scalebox{0.85}{
+		\begin{tabular}{|l|c|c|c|c|c|}
+			\hline
+			Method & Colour hit & Material hit & Edge IoU & DINO-ref & CLIP-T\\
+			\hline
+			Fixed baseline & 0.33 & 0.67 & \textbf{0.378} & \textbf{0.291} & 0.205\\
+			Schedule only (control) & \textbf{1.00} & 0.00 & 0.066 & 0.122 & 0.233\\
+			Router & \textbf{1.00} & 0.33 & 0.044 & 0.147 & \textbf{0.249}\\
+			Flag gate & 0.33 & 0.33 & 0.370 & 0.252 & 0.210\\
+			Flags forced to 1 (control) & 0.67 & \textbf{1.00} & 0.277 & 0.249 & 0.212\\
+			\textbf{ARL (router + flag gate)} & \textbf{1.00} & 0.67 & 0.059 & 0.159 & 0.247\\
+			\hline
+		\end{tabular}
+	\label{table}}\\
+\captionof{table}{\color{Blue} Mean over the 3 pilot rows ($n=3$ images per arm; indicative only).}
+\end{center}
+\begin{center}
+	\includegraphics[width=0.88\linewidth]{figures/Qualitative.png}
+	\captionof{figure}{\color{Blue} Pilot outputs. The ARL column follows the reference's brown leather in all three rows and keeps a small axe; no arm produces the caption's ape (object conflict unresolved).}
+\end{center}
+The ARL keeps reference colour in 3 of 3 rows and material in 2 of 3. The schedule-only control matches the colour score, so most of that gain is the schedule; the flag gate adds material. The cost is sketch fidelity (edge IoU 0.06 vs 0.38); the flag gate alone keeps the sketch (0.37) but rarely changes colour.
+
+%----------------------------------------------------------------------------------------
+%	CONCLUSIONS
+%----------------------------------------------------------------------------------------
+\color{Black}
+\section*{Conclusion}
+\begin{itemize}
+	\item Explicit roles (text = identity, sketch = shape, reference = colour and material) make multimodal conflicts well-defined and measurable.
+	\item The submitted ARL, two small trained networks plus flag-gated text on a frozen SDXL, lets the reference win colour on the pilot with no diffusion weights trained; the cost is sketch fidelity, and object conflicts stay unresolved.
+\end{itemize}
+\textbf{Future work (improving the architecture):}
+\begin{itemize}
+	\item \textbf{Attribute-specific routing:} replace the four global scalars by independent, attribute-aware routing decisions, so identity, geometry, colour and material are controlled separately.
+	\item \textbf{Disentangled reference conditioning:} build reference representations that keep colour and material but suppress object identity and shape, which removes the reference-object leakage.
+	\item \textbf{Spatially-aware conditioning:} region-level masks and spatially adaptive gates change a conflicting attribute locally, so sketch-defined geometry (edge IoU) is not disrupted.
+\end{itemize}
+%----------------------------------------------------------------------------------------
+%	References
+%----------------------------------------------------------------------------------------
+\begin{thebibliography}{6}
+\footnotesize
+\bibitem{SDXL} Dustin Podell, Zion English, Kyle Lacey, Andreas Blattmann, Tim Dockhorn, Jonas M\"uller, Joe Penna and Robin Rombach. SDXL: Improving Latent Diffusion Models for High-Resolution Image Synthesis, International Conference on Learning Representations (ICLR), 2024. \url{https://arxiv.org/abs/2307.01952}
+\bibitem{CN} Lvmin Zhang, Anyi Rao and Maneesh Agrawala. Adding Conditional Control to Text-to-Image Diffusion Models, IEEE/CVF International Conference on Computer Vision (ICCV), 2023. \url{https://arxiv.org/abs/2302.05543}
+\bibitem{IPA} Hu Ye, Jun Zhang, Sibo Liu, Xiao Han and Wei Yang. IP-Adapter: Text Compatible Image Prompt Adapter for Text-to-Image Diffusion Models, arXiv preprint arXiv:2308.06721, 2023. \url{https://arxiv.org/abs/2308.06721}
+\bibitem{Sketchy} Patsorn Sangkloy, Nathan Burnell, Cusuh Ham and James Hays. The Sketchy Database: Learning to Retrieve Badly Drawn Bunnies, ACM Transactions on Graphics, 2016. \url{https://doi.org/10.1145/2897824.2925954}
+\bibitem{CLIP} Alec Radford, Jong Wook Kim, Chris Hallacy, Aditya Ramesh, Gabriel Goh, Sandhini Agarwal, Girish Sastry, Amanda Askell, Pamela Mishkin, Jack Clark, Gretchen Krueger and Ilya Sutskever. Learning Transferable Visual Models From Natural Language Supervision, International Conference on Machine Learning (ICML), 2021. \url{https://arxiv.org/abs/2103.00020}
+\end{thebibliography}
+%----------------------------------------------------------------------------------------
+%	ACKNOWLEDGEMENTS
+%----------------------------------------------------------------------------------------
+\section*{Acknowledgments}
+\small \textnormal{We thank the IE 643 instructor and teaching assistants for their guidance.}
+
+\section*{Github Link and Demo Video Link}
+\vspace{-0.5cm}
+\begin{center}
+		\begin{minipage}{0.4\linewidth}
+			\centering
+			\textbf{Github Repository}\\[1ex]
+			\includegraphics[width=0.5\linewidth]{Repo_QR.png}\\[0.5ex]
+			\scriptsize github.com/Harshitha-282007/constraint-driven-multimodal-diffusion
+		\end{minipage}\hfill
+		\begin{minipage}{0.4\linewidth}
+			\centering
+			\textbf{Demo Video Link}\\[1ex]
+			\includegraphics[width=0.5\linewidth]{Demo_QR.png}\\[0.5ex]
+			\scriptsize Demo video (Google Drive folder)
+		\end{minipage}
+\end{center}
+
+\end{multicols}
+\vspace{0.4cm}
+\end{framed}
+\end{minipage}
+\end{document}

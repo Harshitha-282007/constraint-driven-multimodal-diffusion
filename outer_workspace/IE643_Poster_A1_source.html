@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<title>IE643 Poster - Attribute Routing Layer</title>
+<style>
+@page { size: 594mm 841mm; margin: 0; }
+:root{--amber:#f59e0b;--amber-d:#b45309;--brown:#6b3200;--ink:#2a1804;--cream:#fff8e6;--cream2:#fdecc0;
+--text:#1d4ed8;--sketch:#047857;--ref:#be185d;}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{width:594mm;height:841mm;background:#fff;color:var(--ink);font-family:"Segoe UI","Calibri",Arial,sans-serif;font-size:25px;line-height:1.22;overflow:hidden}
+.page{width:594mm;height:841mm;position:relative;display:flex;flex-direction:column}
+header{height:280px;flex-shrink:0;background:linear-gradient(100deg,#7a3a00,#b45309 55%,#d97706);color:#fff;display:flex;align-items:center;padding:0 60px;gap:40px}
+header .logo{background:#fff;border-radius:18px;padding:12px;height:180px;width:180px;display:flex;align-items:center;justify-content:center}
+header .logo img{max-width:100%;max-height:100%}
+header .mid{flex:1;text-align:center}
+header h1{font-size:62px;line-height:1.08;font-weight:800;letter-spacing:.5px}
+header .course{font-size:28px;color:#ffe3a3;font-weight:700;margin-bottom:8px;letter-spacing:2px}
+header .team{font-size:38px;font-weight:700;margin-top:12px;color:#ffe9b8}
+header .auth{font-size:26px;margin-top:6px;color:#fff3d6}
+.frame{flex:1;margin:16px 30px 26px;border:14px solid var(--amber-d);border-radius:10px;background:#fff;display:flex;padding:20px;gap:0;min-height:0}
+.col{flex:1 1 0;display:flex;flex-direction:column;gap:9px;min-width:0}
+.rule{width:12px;background:var(--amber);margin:0 22px;border-radius:6px}
+section{flex-shrink:0}
+h2{font-size:38px !important;background:linear-gradient(90deg,var(--amber-d),var(--amber));color:#fff;font-weight:800;padding:4px 18px;border-radius:8px;margin-bottom:12px;letter-spacing:.5px}
+p{margin-bottom:8px}
+ul{padding-left:34px} li{margin-bottom:3px}
+b{color:var(--brown)}
+.cap{font-size:22px;color:var(--brown);text-align:center;font-style:italic;margin-top:4px}
+.box{background:var(--cream);border:3px solid var(--amber);border-radius:12px;padding:14px 20px}
+.warn{background:#fff1f0;border:3px solid #c2410c;border-radius:12px;padding:8px 16px;font-size:24px}
+table{border-collapse:collapse;width:100%;font-size:23px}
+th{background:var(--amber-d);color:#fff;padding:5px 9px;text-align:center}
+td{padding:4px 9px;border-bottom:2px solid #e9c987;text-align:center}
+td:first-child,th:first-child{text-align:left}
+tr:nth-child(even) td{background:var(--cream)}
+.nt td{text-align:left;font-size:22px;vertical-align:top}
+.nt td:first-child{font-weight:700;color:var(--brown);width:22%}
+.chip{display:inline-block;padding:1px 12px;border-radius:30px;color:#fff;font-weight:700;font-size:23px;margin:2px}
+.t{background:var(--text)}.s{background:var(--sketch)}.r{background:var(--ref)}
+.q{display:grid;grid-template-columns:110px repeat(6,1fr);gap:5px;align-items:center;font-size:21px;text-align:center}
+.q img{width:100%;display:block;border-radius:4px}
+.q .h{font-weight:700;color:var(--brown);line-height:1.05}
+.q .rl{font-weight:700;text-align:left;line-height:1.1}
+.ph{border:4px dashed #c2410c;background:#fff7f0;color:#9a3412;text-align:center;padding:8px;font-size:22px;border-radius:10px}
+.refs{font-size:21px;line-height:1.22} .refs li{margin-bottom:4px}
+.row2{display:flex;gap:20px}
+.qr{text-align:center;font-size:27px;font-weight:700}
+.qr img{width:210px;display:block;margin:6px auto}
+</style></head><body><div class="page">
+
+<header>
+ <div class="logo"><img src="img/iitb.png"></div>
+ <div class="mid">
+  <div class="course">IE 643 COURSE PROJECT</div>
+  <h1>Constraint-Driven Multimodal Diffusion<br>using Text, Sketch and Reference Image</h1>
+  <div class="team">Team: One Sheep Army</div>
+  <div class="auth">[Team member names and roll numbers: to be filled] &nbsp;|&nbsp; [e-mail addresses: to be filled]</div>
+ </div>
+ <div class="logo"><img src="img/ie643.png"></div>
+</header>
+
+<div class="frame">
+<!-- ============================ LEFT ============================ -->
+<div class="col" >
+
+<section><h2>Abstract</h2>
+<p>Text, sketch and reference image can disagree about the same object. We study an <b>Attribute Routing Layer (ARL)</b> that gives each modality an explicit job: <b>text = identity</b>, <b>sketch = shape</b>, <b>reference = colour and material</b>. The ARL is meant to sit between the three conditioning signals and a frozen SDXL + ControlNet + IP-Adapter backbone.</p>
+<p>We tested routing variants on a 200-photo Sketchy conflict set. <b>Detecting conflicts and rescaling global strengths did not enforce attribute control.</b> A simple neutral-caption intervention improved object compliance and sketch fidelity, but not colour or material.</p>
+</section>
+
+<section><h2>Introduction</h2>
+<ul>
+<li>One generation receives <span class="chip t">text</span><span class="chip s">sketch</span><span class="chip r">reference</span> at once, and they can conflict: the caption says <i>purple</i>, the reference is <i>silver</i>.</li>
+<li>Without a rule the strongest pathway wins; a reference also carries its own object shape.</li>
+<li>Giving each modality a <b>separate attribute responsibility</b> makes the conflict well-posed and the result measurable per attribute.</li>
+</ul>
+<div class="box" style="margin-top:6px;text-align:center;font-weight:700;color:var(--brown)"><span class="chip t">text: identity</span> <span class="chip s">sketch: shape</span> <span class="chip r">reference: colour + material</span><br>Rule: where inputs conflict, the reference wins colour</div>
+</section>
+
+<section><h2>Main Contributions</h2>
+<ul>
+<li><b>Three-modality attribute-routing formulation</b>: each attribute has exactly one governing modality.</li>
+<li><b>Attribute Routing Layer</b> architecture that directs identity, geometry and appearance to separate conditioning pathways of SDXL.</li>
+<li><b>Conflict-oriented dataset</b>: Sketchy-based, with object, colour, material and swapped-reference conflict rows.</li>
+<li><b>Experiments on attribute-level control</b>, including negative results, with attribute-wise compliance metrics.</li>
+</ul>
+</section>
+
+<section><h2>Workflow</h2>
+<svg viewBox="0 0 1030 305" width="100%">
+ <defs><marker id="a" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M0,0 L10,5 L0,10z" fill="#6b3200"/></marker></defs>
+ <g font-size="25" font-weight="700" text-anchor="middle" fill="#fff">
+ <rect x="5" y="10" width="190" height="50" rx="10" fill="#1d4ed8"/><text x="100" y="43">Text</text>
+ <rect x="5" y="75" width="190" height="50" rx="10" fill="#047857"/><text x="100" y="108">Sketch</text>
+ <rect x="5" y="140" width="190" height="50" rx="10" fill="#be185d"/><text x="100" y="173">Reference</text></g>
+ <g stroke="#6b3200" stroke-width="3.5" fill="none" marker-end="url(#a)"><path d="M197,35 L246,85"/><path d="M197,100 L246,100"/><path d="M197,165 L246,115"/>
+ <path d="M440,100 L500,100"/><path d="M690,100 L745,100"/><path d="M880,100 L880,165"/></g>
+ <rect x="250" y="30" width="200" height="140" rx="14" fill="#f59e0b" stroke="#6b3200" stroke-width="4"/>
+ <text x="350" y="85" font-size="25" font-weight="800" text-anchor="middle" fill="#2a1804">Attribute</text><text x="350" y="118" font-size="25" font-weight="800" text-anchor="middle" fill="#2a1804">Routing Layer</text><text x="349" y="150" font-size="22" text-anchor="middle" fill="#2a1804">intended</text>
+ <rect x="503" y="30" width="190" height="140" rx="14" fill="#fdecc0" stroke="#b45309" stroke-width="3"/>
+ <text x="598" y="85" font-size="26" font-weight="700" text-anchor="middle" fill="#2a1804">SDXL</text><text x="598" y="116" font-size="24" text-anchor="middle" fill="#2a1804">conditioning</text><text x="598" y="146" font-size="24" text-anchor="middle" fill="#2a1804">pipeline</text>
+ <rect x="748" y="50" width="265" height="100" rx="14" fill="#fff8e6" stroke="#b45309" stroke-width="3"/>
+ <text x="880" y="92" font-size="26" font-weight="700" text-anchor="middle" fill="#2a1804">Generated</text><text x="880" y="124" font-size="26" font-weight="700" text-anchor="middle" fill="#2a1804">image</text>
+ <rect x="700" y="170" width="320" height="130" rx="14" fill="#7a3a00"/>
+ <text x="860" y="214" font-size="26" font-weight="700" text-anchor="middle" fill="#fff">Attribute-wise evaluation</text>
+ <text x="860" y="248" font-size="23" text-anchor="middle" fill="#ffe3a3">object | colour | material</text><text x="860" y="278" font-size="23" text-anchor="middle" fill="#ffe3a3">swapped reference | edge IoU</text>
+</svg>
+<div class="cap">Figure 1. Overall workflow, inputs to attribute-wise evaluation.</div>
+</section>
+
+<section><h2>Methodology</h2>
+<svg viewBox="0 0 1030 250" width="100%">
+ <defs><marker id="b" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M0,0 L10,5 L0,10z" fill="#6b3200"/></marker></defs>
+ <text x="5" y="30" font-size="27" font-weight="800" fill="#6b3200">Baseline: fixed global strengths</text>
+ <rect x="5" y="45" width="300" height="55" rx="10" fill="#fdecc0" stroke="#b45309" stroke-width="3"/><text x="155" y="82" font-size="25" text-anchor="middle" fill="#2a1804">text + sketch + reference</text>
+ <rect x="400" y="45" width="260" height="55" rx="10" fill="#e5e7eb" stroke="#6b7280" stroke-width="3"/><text x="530" y="82" font-size="25" text-anchor="middle" fill="#2a1804">one scale per pathway</text>
+ <rect x="750" y="45" width="270" height="55" rx="10" fill="#fdecc0" stroke="#b45309" stroke-width="3"/><text x="885" y="82" font-size="25" text-anchor="middle" fill="#2a1804">SDXL backbone</text>
+ <g stroke="#6b3200" stroke-width="3.5" marker-end="url(#b)"><path d="M307,72 L398,72"/><path d="M662,72 L748,72"/></g>
+ <text x="5" y="160" font-size="27" font-weight="800" fill="#b45309">Proposed: attribute-aware routing</text>
+ <rect x="5" y="175" width="300" height="55" rx="10" fill="#fdecc0" stroke="#b45309" stroke-width="3"/><text x="155" y="212" font-size="25" text-anchor="middle" fill="#2a1804">text + sketch + reference</text>
+ <rect x="380" y="170" width="300" height="65" rx="10" fill="#f59e0b" stroke="#6b3200" stroke-width="4"/><text x="530" y="212" font-size="24" font-weight="800" text-anchor="middle" fill="#2a1804">Attribute Routing Layer</text>
+ <rect x="750" y="175" width="270" height="55" rx="10" fill="#fdecc0" stroke="#b45309" stroke-width="3"/><text x="885" y="212" font-size="25" text-anchor="middle" fill="#2a1804">SDXL backbone</text>
+ <g stroke="#6b3200" stroke-width="3.5" marker-end="url(#b)"><path d="M307,202 L376,202"/><path d="M662,202 L748,202"/></g>
+</svg>
+<ul>
+<li><b>Backbone:</b> frozen SDXL, scribble ControlNet (sketch), IP-Adapter ViT-H (reference).</li>
+<li><b>Router:</b> reads the three inputs and decides, per attribute, which pathway may carry it.</li>
+<li><b>Conditioning pathways:</b> text cross-attention (identity), ControlNet residuals (geometry), IP-Adapter tokens (colour, material).</li>
+<li><b>Intervention tested:</b> neutral caption (colour words become "colored", material words "solid") plus a higher IP-Adapter scale.</li>
+</ul>
+</section>
+<section><h2>Dataset Details</h2>
+<div class="row2">
+<div style="flex:1.25">
+<ul style="padding-left:34px">
+<li><b>Source:</b> Sketchy sketch-photo pairs; <b>~200 selected photos</b>, one object each.</li>
+<li><b>Per example:</b> photo, sketch, caption (Qwen3-VL-2B), neutral-object reference carrying the photo's colour, material and finish.</li>
+<li><b>Conflict cases:</b> object, colour, material, swapped reference (rows built from metadata).</li>
+</ul></div>
+<div style="flex:1">
+<table><tr><th>Split</th><th>Photos</th></tr><tr><td>Train</td><td>160</td></tr><tr><td>Validation</td><td>20</td></tr><tr><td>Test</td><td>20</td></tr><tr><td><b>Total</b></td><td><b>200</b></td></tr></table>
+<div class="cap" style="font-size:24px">split by photo</div></div>
+</div>
+</section>
+
+<section><h2>Conclusion</h2>
+<ul>
+<li>Explicit attribute responsibilities (text = identity, sketch = shape, reference = colour and material) make multimodal conflicts well-defined and measurable.</li>
+<li>Global conditioning cannot enforce them: flags and strengths changed little in the output.</li>
+<li>Reliable attribute-level control with a trained ARL remains open.</li>
+</ul>
+</section>
+
+<section><h2>References</h2>
+<ol class="refs" style="padding-left:30px">
+<li>Podell et al. SDXL: Improving Latent Diffusion Models for High-Resolution Image Synthesis. ICLR 2024.</li>
+<li>Zhang, Rao, Agrawala. Adding Conditional Control to Text-to-Image Diffusion Models. ICCV 2023.</li>
+<li>Ye et al. IP-Adapter: Text Compatible Image Prompt Adapter for Text-to-Image Diffusion Models. arXiv:2308.06721, 2023.</li>
+<li>Sangkloy et al. The Sketchy Database: Learning to Retrieve Badly Drawn Bunnies. ACM TOG 35(4), 2016.</li>
+<li>Radford et al. Learning Transferable Visual Models From Natural Language Supervision (CLIP). ICML 2021.</li>
+</ol></section>
+</div>
+
+<div class="rule"></div>
+
+<!-- ============================ RIGHT ============================ -->
+<div class="col" >
+
+<section><h2>Architecture: Attribute Routing Layer</h2>
+<svg viewBox="0 0 1040 925" width="100%" style="display:block;margin:0 auto">
+ <defs>
+  <marker id="c" markerWidth="12" markerHeight="12" refX="9" refY="6" orient="auto"><path d="M0,0 L12,6 L0,12z" fill="#6b3200"/></marker>
+  <filter id="sh"><feDropShadow dx="0" dy="3" stdDeviation="4" flood-opacity=".25"/></filter>
+ </defs>
+ <!-- inputs -->
+ <g font-weight="700" text-anchor="middle" fill="#fff" filter="url(#sh)">
+  <rect x="10" y="5" width="320" height="150" rx="16" fill="#1d4ed8"/><text x="170" y="46" font-size="33">TEXT</text><text x="170" y="78" font-size="23" font-weight="400">"vintage motorcycle ..."</text><text x="170" y="108" font-size="24">identity, semantics</text><text x="170" y="140" font-size="21" font-weight="400">SDXL text encoders</text>
+  <rect x="360" y="5" width="320" height="150" rx="16" fill="#047857"/><text x="520" y="46" font-size="33">SKETCH</text><text x="520" y="78" font-size="23" font-weight="400">scribble contour</text><text x="520" y="108" font-size="24">geometry, spatial layout</text><text x="520" y="140" font-size="21" font-weight="400">Scribble ControlNet</text>
+  <rect x="710" y="5" width="320" height="150" rx="16" fill="#be185d"/><text x="870" y="46" font-size="33">REFERENCE</text><text x="870" y="78" font-size="23" font-weight="400">neutral object, photo palette</text><text x="870" y="108" font-size="24">colour, material</text><text x="870" y="140" font-size="21" font-weight="400">IP-Adapter (ViT-H)</text>
+ </g>
+ <g stroke="#6b3200" stroke-width="4" marker-end="url(#c)" fill="none"><path d="M170,158 L170,200"/><path d="M520,158 L520,200"/><path d="M870,158 L870,200"/></g>
+ <g transform="translate(0,-82)"><!-- ARL -->
+ <rect x="0" y="285" width="1040" height="400" rx="22" fill="#fff4d0" stroke="#b45309" stroke-width="7" filter="url(#sh)"/>
+ <rect x="0" y="285" width="1040" height="62" rx="22" fill="#b45309"/><rect x="0" y="320" width="1040" height="27" fill="#b45309"/>
+ <text x="520" y="330" font-size="38" font-weight="800" text-anchor="middle" fill="#fff">ATTRIBUTE ROUTING LAYER (ARL)</text>
+ <!-- router -->
+ <rect x="30" y="362" width="980" height="78" rx="12" fill="#f59e0b" stroke="#6b3200" stroke-width="3"/>
+ <text x="520" y="396" font-size="28" font-weight="800" text-anchor="middle" fill="#2a1804">Router: which modality may govern which attribute?</text>
+ <text x="520" y="428" font-size="24" text-anchor="middle" fill="#2a1804">conflict flags (object, colour, material) + denoising step  &#8594;  routing weights</text>
+ <!-- matrix -->
+ <g font-size="25" text-anchor="middle" fill="#2a1804">
+  <text x="190" y="478" font-weight="700" fill="#6b3200" text-anchor="start" x2="0">Attribute</text>
+  <text x="430" y="478" font-weight="700" fill="#1d4ed8">Text path</text>
+  <text x="640" y="478" font-weight="700" fill="#047857">Sketch path</text>
+  <text x="850" y="478" font-weight="700" fill="#be185d">Reference path</text>
+ </g>
+ <g font-size="25" fill="#2a1804">
+  <text x="45" y="520" font-weight="700">Identity</text><text x="45" y="562" font-weight="700">Geometry</text><text x="45" y="604" font-weight="700">Colour</text><text x="45" y="646" font-weight="700">Material</text>
+ </g>
+ <g>
+  <!-- row boxes -->
+  <rect x="35" y="492" width="970" height="40" rx="6" fill="none"/>
+ </g>
+ <g font-size="30" font-weight="800" text-anchor="middle">
+  <!-- Identity -->
+  <rect x="340" y="495" width="180" height="36" rx="18" fill="#1d4ed8"/><text x="430" y="522" fill="#fff" font-size="23">PASS</text>
+  <rect x="550" y="495" width="180" height="36" rx="18" fill="#e5e7eb"/><text x="640" y="522" fill="#6b7280" font-size="23">block</text>
+  <rect x="760" y="495" width="180" height="36" rx="18" fill="#e5e7eb"/><text x="850" y="522" fill="#6b7280" font-size="23">block</text>
+  <!-- Geometry -->
+  <rect x="340" y="537" width="180" height="36" rx="18" fill="#e5e7eb"/><text x="430" y="564" fill="#6b7280" font-size="23">block</text>
+  <rect x="550" y="537" width="180" height="36" rx="18" fill="#047857"/><text x="640" y="564" fill="#fff" font-size="23">PASS</text>
+  <rect x="760" y="537" width="180" height="36" rx="18" fill="#e5e7eb"/><text x="850" y="564" fill="#6b7280" font-size="23">block</text>
+  <!-- Colour -->
+  <rect x="340" y="579" width="180" height="36" rx="18" fill="#e5e7eb"/><text x="430" y="606" fill="#6b7280" font-size="23">neutralise</text>
+  <rect x="550" y="579" width="180" height="36" rx="18" fill="#e5e7eb"/><text x="640" y="606" fill="#6b7280" font-size="23">block</text>
+  <rect x="760" y="579" width="180" height="36" rx="18" fill="#be185d"/><text x="850" y="606" fill="#fff" font-size="23">PASS</text>
+  <!-- Material -->
+  <rect x="340" y="621" width="180" height="36" rx="18" fill="#e5e7eb"/><text x="430" y="648" fill="#6b7280" font-size="23">neutralise</text>
+  <rect x="550" y="621" width="180" height="36" rx="18" fill="#e5e7eb"/><text x="640" y="648" fill="#6b7280" font-size="23">block</text>
+  <rect x="760" y="621" width="180" height="36" rx="18" fill="#be185d"/><text x="850" y="648" fill="#fff" font-size="23">PASS</text>
+ </g>
+ <text x="520" y="674" font-size="21" text-anchor="middle" fill="#6b3200" font-style="italic">intended routing matrix; &#8220;neutralise&#8221; = colour/material words in the caption replaced by &#8220;colored&#8221;/&#8220;solid&#8221;</text>
+
+ <!-- arrows to backbone -->
+ <g stroke="#6b3200" stroke-width="4.5" marker-end="url(#c)" fill="none"><path d="M170,687 L170,742"/><path d="M520,687 L520,742"/><path d="M870,687 L870,742"/></g>
+ <g font-size="22" fill="#6b3200" font-weight="700"><text x="225" y="722">routed text</text><text x="575" y="722">gated residuals</text><text x="905" y="722">IP tokens</text></g>
+
+ <!-- backbone -->
+ <rect x="0" y="745" width="1040" height="165" rx="18" fill="#fff" stroke="#6b3200" stroke-width="5"/>
+ <text x="520" y="785" font-size="30" font-weight="800" text-anchor="middle" fill="#6b3200">SDXL GENERATION BACKBONE (frozen)</text>
+ <g font-size="24" text-anchor="middle" fill="#2a1804">
+  <rect x="25" y="805" width="310" height="85" rx="10" fill="#dbe7ff" stroke="#1d4ed8" stroke-width="3"/><text x="180" y="842">cross-attention</text><text x="180" y="874" font-size="22">text conditioning</text>
+  <rect x="365" y="805" width="310" height="85" rx="10" fill="#d1f5e6" stroke="#047857" stroke-width="3"/><text x="520" y="842">ControlNet residuals</text><text x="520" y="874" font-size="22">added to UNet</text>
+  <rect x="705" y="805" width="310" height="85" rx="10" fill="#fbd5e5" stroke="#be185d" stroke-width="3"/><text x="860" y="842">IP-Adapter</text><text x="860" y="874" font-size="22">decoupled cross-attention</text></g>
+ <g stroke="#6b3200" stroke-width="3.5" marker-end="url(#c)" fill="none"><path d="M520,912 L520,935"/></g>
+ <rect x="320" y="937" width="400" height="62" rx="12" fill="#7a3a00"/><text x="520" y="978" font-size="28" font-weight="700" text-anchor="middle" fill="#fff">Generated image</text></g>
+</svg>
+<div class="cap">Figure 2. The ARL between the conditioning pathways and frozen SDXL (<b>intended</b> routing).</div>
+<div class="warn"><b>Demonstrated:</b> rule-based text-path neutralisation, conflict flags. <b>Not demonstrated:</b> learned routing that reliably enforces colour/material from the reference. Control is <b>not solved</b>.</div>
+</section>
+
+<section><h2>Novelty Assessment</h2>
+<table class="nt"><tr><th>Approach</th><th>What was tested</th><th>Key observation</th></tr>
+<tr><td>Fixed / scheduled conditioning</td><td>Constant or time-scheduled sketch, reference and text strengths</td><td>Reference copies its own object; no attribute separation</td></tr>
+<tr><td>Learned global router</td><td>CLIP compatibility scores &#8594; 4 global strengths</td><td>No better than the hand schedule; blind to colour and material conflicts</td></tr>
+<tr><td>Governance conflict detection</td><td>Network flags object, colour, material conflicts</td><td>Detects conflicts well (colour 0.755, material 0.940), yet images barely changed</td></tr>
+<tr><td>Role gates and neutral caption</td><td>Per-role gates in SDXL; colour/material words neutralised</td><td>Gates moved little; neutral caption improved sketch fidelity and object compliance</td></tr>
+<tr><td>Colour adapter and role LoRA</td><td>Palette adapter; role-specific LoRA</td><td>LoRA raised edge overlap but severely cut target similarity</td></tr></table>
+<p style="margin-top:10px"><b>Key lesson:</b> detecting conflicts and adjusting <i>global</i> strengths does not enforce <i>attribute-specific</i> control; sketch fidelity, reference compliance and target similarity trade off.</p>
+</section>
+
+<section><h2>Results</h2>
+<table><tr><th>Method</th><th>Object</th><th>Colour</th><th>Material</th><th>Swapped ref.</th><th>Edge IoU</th></tr>
+<tr><td>Fixed baseline</td><td>0.10</td><td><b>0.70</b></td><td><b>0.67</b></td><td><b>0.70</b></td><td>0.213</td></tr>
+<tr><td>Neutral caption + IP scale 1.0</td><td>0.30</td><td><b>0.70</b></td><td><b>0.67</b></td><td>0.00</td><td>0.376</td></tr>
+<tr><td>Role LoRA</td><td>0.30</td><td>0.30</td><td>0.00</td><td>0.40</td><td><b>0.753</b></td></tr></table>
+<div class="cap">Table 1. Compliance rates and edge IoU on the verified 12-test-photo comparison.</div>
+<p style="margin-top:8px"><b>Reading:</b> neutral caption improved object compliance and sketch fidelity but <b>not</b> colour or material, and <b>failed</b> on swapped references (0.00). Role LoRA raised edge overlap but suffered a severe target-similarity drop.</p>
+
+<div class="q" style="margin-top:12px">
+ <div></div><div class="h">Sketch</div><div class="h">Reference</div><div class="h">Fixed</div><div class="h">Global router</div><div class="h">Flag gate</div><div class="h">Router + gate</div>
+ <div class="rl">Object<br><span style="color:var(--text)">text governs</span></div><img src="img/q_0_sketch.jpg"><img src="img/q_0_ref.jpg"><img src="img/q_0_A_fixed.jpg"><img src="img/q_0_B_router.jpg"><img src="img/q_0_D_flaggate.jpg"><img src="img/q_0_E_router_flaggate.jpg">
+ <div class="rl">Colour<br><span style="color:var(--ref)">ref governs</span></div><img src="img/q_1_sketch.jpg"><img src="img/q_1_ref.jpg"><img src="img/q_1_A_fixed.jpg"><img src="img/q_1_B_router.jpg"><img src="img/q_1_D_flaggate.jpg"><img src="img/q_1_E_router_flaggate.jpg">
+</div>
+<div class="cap">Figure 3. Pilot rows (earlier global-conditioning arms, one test photo). Sketch shape is followed in all arms; the caption's ape is never produced (object conflict: failure); brown leather palette follows the reference (colour: success). [PLACEHOLDER: qualitative images for the three Table 1 methods were not in the project files.]</div>
+
+</section>
+
+<div class="row2">
+<section style="flex:1"><h2>Acknowledgements</h2><p>[To be filled in by the team.]<br><br><br></p></section>
+<section style="flex:1.4"><h2>GitHub / Demo</h2><div style="font-size:18px;text-align:center">github.com/Harshitha-282007/constraint-driven-multimodal-diffusion</div>
+<div class="row2" style="justify-content:space-around;align-items:flex-start">
+<div class="qr">Repository<img src="img/qr_repo.png" style="width:115px"></div>
+<div class="qr">Demo<div class="ph" style="width:115px;height:115px;margin:6px auto;font-size:19px;display:flex;align-items:center;justify-content:center">[Demo link not available]</div></div>
+</div></section>
+</div>
+
+</div>
+</div>
+</div></body></html>
