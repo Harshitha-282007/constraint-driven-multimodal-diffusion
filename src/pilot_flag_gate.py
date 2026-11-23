@@ -57,7 +57,7 @@ def pick_photos(base_rows, tokenizer, split="test", seed=1):
     out, oids = [], set()
     for r in sorted(rows, key=lambda r: (r["original_id"], ER.kind_of(r))):
         k = ER.kind_of(r)
-        if not r["gates"]["g_" + k]:
+        if k not in KINDS or not r["gates"]["g_" + k]:
             continue
         if k != "obj" and neutral_caption(tokenizer, r["caption"], {"col": "colour", "mat": "material"}[k]) is None:
             continue
