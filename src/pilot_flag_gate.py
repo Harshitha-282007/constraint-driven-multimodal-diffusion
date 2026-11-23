@@ -50,6 +50,21 @@ def pick_photo(base_rows, tokenizer, split="test", seed=1):
     raise RuntimeError("no test photo satisfies the selection rule")
 
 
+def pick_photos(base_rows, tokenizer, split="test", seed=1):
+    """Every photo of the split, with each conflict kind (obj / col / mat) kept when its rule flag is on and, for colour /
+    material, the word can be neutralised. Returns (photo ids, rows); unlike pick_photo no photo is dropped for lacking a kind."""
+    rows = [r for r in L.expand_rows(base_rows, per_type=1, seed=seed, kinds=KINDS) if r["split"] == split]
+    out, oids = [], set()
+    for r in sorted(rows, key=lambda r: (r["original_id"], ER.kind_of(r))):
+        k = ER.kind_of(r)
+        if not r["gates"]["g_" + k]:
+            continue
+        if k != "obj" and neutral_caption(tokenizer, r["caption"], {"col": "colour", "mat": "material"}[k]) is None:
+            continue
+        out.append(r); oids.add(r["original_id"])
+    return sorted(oids), out
+
+
 def run_pilot(P, rows, data_dir, out_dir, net=None, router=None, kit=None, arms=ARMS, log=print):
     from governance import model as GM
     from pipeline import seed_for
