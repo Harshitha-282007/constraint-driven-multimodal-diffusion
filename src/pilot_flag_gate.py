@@ -65,10 +65,14 @@ def pick_photos(base_rows, tokenizer, split="test", seed=1):
     return sorted(oids), out
 
 
-def run_pilot(P, rows, data_dir, out_dir, net=None, router=None, kit=None, arms=ARMS, log=print):
+def run_pilot(P, rows, data_dir, out_dir, net=None, router=None, kit=None, arms=ARMS, log=print, sync_dir=None, sync_every=6):
+    import shutil
     from governance import model as GM
     from pipeline import seed_for
     os.makedirs(out_dir, exist_ok=True)
+    if sync_dir and os.path.isdir(sync_dir):        # resume: pull images already saved to Drive
+        shutil.copytree(sync_dir, out_dir, dirs_exist_ok=True)
+    n_new = 0
     op = lambda r, k: Image.open(f"{data_dir}/{r[k]}")
     P.prepare_object_dirs([r.get("ref_object") or "object" for r in rows])
     specs = [dict(key=r["id"], sketch=op(r, "sketch"), ref=op(r, "reference"), caption=r["caption"], obj=r.get("caption_category", r["category"]),
@@ -117,6 +121,9 @@ def run_pilot(P, rows, data_dir, out_dir, net=None, router=None, kit=None, arms=
             torch.cuda.synchronize(); times[f"{arm}|{r['id']}"] = round(time.time() - t0, 2)
             json.dump(times, open(tpath, "w"), indent=1)
             log("%-18s %-22s %.1fs" % (arm, r["id"], times[f"{arm}|{r['id']}"]))
+            n_new += 1
+            if sync_dir and n_new % sync_every == 0:     # periodic backup so a disconnect loses at most sync_every images
+                shutil.copytree(out_dir, sync_dir, dirs_exist_ok=True)
     config = dict(res=P.res, steps=P.steps, arms=list(arms), rows=[r["id"] for r in rows], info=info,
                   cfg_center=dict(cs=1.0, hold=0.7, ip=0.5, cfg=7.0), relax=0.3)
     json.dump(config, open(f"{out_dir}/config.json", "w"), indent=1, default=str)
